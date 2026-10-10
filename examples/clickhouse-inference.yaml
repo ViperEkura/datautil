@@ -1,0 +1,11 @@
+# Example for a ClickHouse SELECT ... FORMAT JSONEachRow export.
+version: 1
+name: clickhouse-inference
+container: JSONEachRow
+layout: pair
+fields:
+  id: request_id
+  system: request.system_prompt
+  prompt: request.prompt
+  completion: response.text
+

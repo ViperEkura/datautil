@@ -1,0 +1,17 @@
+version: 1
+name: custom-chat
+container: jsonl
+layout: messages
+fields:
+  id: conversation_id
+  messages: dialogue.turns
+  role: speaker
+  content: text
+  tool_calls: calls
+  tool_call_id: call_id
+role_map:
+  human: user
+  bot: assistant
+  function: tool
+  system: system
+

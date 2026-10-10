@@ -1,0 +1,14 @@
+code: Programming, software engineering, debugging, and code tools
+math: Mathematics, statistics, proofs, and quantitative reasoning
+science: Natural sciences and scientific research, excluding medical care
+technology: Hardware, networks, devices, and IT use, excluding programming
+health: Medicine, health, nutrition, and clinical care
+law: Laws, legal procedures, rights, and compliance
+finance: Personal finance, accounting, investing, and financial markets
+business: Business operations, management, marketing, and commerce, excluding finance
+humanities: History, philosophy, religion, and the arts
+social_science: Politics, economics, psychology, sociology, and society
+education: Teaching methods, learning strategy, and curriculum; subject-specific tutoring uses the subject label
+writing: Writing, editing, translation, and creative text when no specialized subject dominates
+general: Everyday assistance, planning, and general knowledge without a specialized subject
+other: Insufficient context, equally mixed subjects, or none of the listed domains

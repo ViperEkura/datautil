@@ -1,0 +1,22 @@
+version: 1
+steps:
+  - id: cleaned
+    command: transform
+    input: source.jsonl
+    output: cleaned.jsonl
+    from: openai-messages
+    rules:
+      - op: trim_content
+      - op: drop_empty_messages
+      - op: keep_if
+        conditions:
+          min_messages: 2
+          roles_all: [user, assistant]
+  - id: sampled
+    command: sample
+    input: "@cleaned"
+    output: sample.jsonl
+    from: openai-messages
+    count: 100
+    seed: 42
+

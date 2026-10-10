@@ -1,0 +1,11 @@
+version: 1
+rules:
+  - op: trim_content
+    roles: [user, assistant]
+  - op: drop_empty_messages
+  - op: keep_if
+    conditions:
+      min_messages: 2
+      max_chars: 20000
+      roles_all: [user, assistant]
+

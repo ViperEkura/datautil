@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datautil-llm-dev"
+version = "0.3.0"
+description = "Inspect, convert, deduplicate, classify, and split conversation datasets"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0", "datasketch>=2.0,<3"]
+
+[project.scripts]
+datautil = "datautil.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
