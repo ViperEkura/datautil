@@ -11,7 +11,7 @@ datautil --help
 
 Python 3.10+ is required. Runtime dependencies are `PyYAML` and `datasketch`.
 
-Development and commit conventions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+See the [usage guide](docs/usage.md) for command examples, the [design document](docs/design.md) for architecture and planned changes, and [CONTRIBUTING.md](CONTRIBUTING.md) for development conventions.
 
 ## Commands
 
@@ -114,6 +114,10 @@ steps:
 ```
 
 `dedup scan` first finds exact matches of normalized text with SHA-256, then uses `datasketch` MinHash LSH to find near-match candidates, which are checked with exact 5-character-shingle Jaccard similarity. At `--threshold 1`, exact shingle sets are compared directly. `--scope conversation` (default) compares the whole conversation, including roles, text, tool names, and arguments; `--scope user` compares only user messages. Records without usable user text remain singletons in user scope and are counted in the report. Review candidate groups before `dedup apply`; `pairs[].match` identifies `exact` or `near` edges. LSH may miss near matches, and rescanning can change groups because its candidate index differs from earlier versions. Older group files still work with `dedup apply` and `split --groups`, which keeps each group wholly in one partition. The output format follows its filename extension: `.jsonl` and `.ndjson` are line-delimited; `.json` is an array. Conversion fails by default if the destination cannot represent the source data.
+
+For large inputs, `sample`, `split`, `classify`, and `dedup apply` stream records and use temporary SQLite indexes where needed. `dedup scan` stores normalized text and shingles on disk, but its MinHash LSH index and matched groups still grow with input size. These commands need temporary disk space. A fixed seed gives repeatable results; `split` assignments can differ from versions that shuffled all records in memory. `dedup apply` includes at most 1,000 decisions in its summary and sets `decisions_truncated` when more were made.
+
+`validate` continues after malformed JSONL rows, reports duplicate record IDs, and retains at most 1,000 issue details by default. Use `--max-errors N` to change the detail limit; `issue_count` always counts all detected issues. The limit controls reporting, not how many rows are checked.
 
 ## Custom format profiles
 

@@ -1,7 +1,20 @@
-__pycache__/
-*.py[cod]
-.venv/
-build/
-dist/
-*.egg-info/
-.pytest_cache/
+# Track only source, tests, configuration examples, and documentation.
+*
+
+!/.gitignore
+!/README.md
+!/CONTRIBUTING.md
+!/pyproject.toml
+
+!/src/
+!/src/datautil/
+!/src/datautil/*.py
+
+!/tests/
+!/tests/*.py
+
+!/examples/
+!/examples/*.yaml
+
+!/docs/
+!/docs/*.md
