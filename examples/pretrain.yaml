@@ -1,0 +1,37 @@
+version: 1
+sources:
+  - name: web
+    input: web.jsonl
+    format: jsonl
+    weight: 3
+    fields:
+      id: id
+      text: content.body
+      metadata:
+        url: url
+        language: language
+  - name: books
+    input: books.parquet
+    format: parquet
+    weight: 1
+    fields:
+      id: doc_id
+      text: text
+      metadata:
+        title: title
+mix:
+  count: 100000
+  seed: 42
+quality:
+  min_chars: 100
+dedup:
+  document:
+    threshold: 0.8
+    shingle_size: 5
+    max_candidates: 10000
+  paragraph:
+    threshold: 1.0
+    min_chars: 80
+output: pretrain.jsonl
+report: pretrain-report.jsonl
+decisions: pretrain-decisions.jsonl

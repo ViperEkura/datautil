@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 _BAR_WIDTH = 20
 
 
@@ -31,11 +30,19 @@ def render_analysis(summary: dict[str, Any]) -> str:
         f"Format: {summary['source_format'] or 'unknown'}",
         f"Conversations: {records:,}  Messages: {messages:,}  Average: {summary['average_messages_per_record']:.1f} messages/conversation",
         "",
-        *_distribution(summary["source_label_heading"], summary["source_label_counts"], messages),
+        *_distribution(
+            summary["source_label_heading"], summary["source_label_counts"], messages
+        ),
         "",
-        *_distribution("Messages per conversation", summary["message_count_distribution"], records),
+        *_distribution(
+            "Messages per conversation", summary["message_count_distribution"], records
+        ),
         "",
-        *_distribution("Text characters per conversation", summary["content_chars_distribution"], records),
+        *_distribution(
+            "Text characters per conversation",
+            summary["content_chars_distribution"],
+            records,
+        ),
         "",
     ]
     coverage = []
@@ -46,11 +53,28 @@ def render_analysis(summary: dict[str, Any]) -> str:
     if coverage:
         lines.extend(["Coverage (of conversations)", *coverage, ""])
     if summary["thinking_observed_records"]:
-        lines.extend(_distribution("Thinking characters per conversation", summary["thinking_chars_distribution"], records))
+        lines.extend(
+            _distribution(
+                "Thinking characters per conversation",
+                summary["thinking_chars_distribution"],
+                records,
+            )
+        )
         lines.append("")
     if summary["tool_records"]:
-        lines.extend(_distribution("Longest tool chain in rounds", summary["tool_chain_bucket_distribution"], records))
-        lines.extend(["", f"Tool calls: {summary['tool_call_count']:,}  Unanswered: {summary['unanswered_tool_calls']:,}"])
+        lines.extend(
+            _distribution(
+                "Longest tool chain in rounds",
+                summary["tool_chain_bucket_distribution"],
+                records,
+            )
+        )
+        lines.extend(
+            [
+                "",
+                f"Tool calls: {summary['tool_call_count']:,}  Unanswered: {summary['unanswered_tool_calls']:,}",
+            ]
+        )
     if summary["malformed_thinking_messages"]:
         lines.append(f"Malformed thinking: {summary['malformed_thinking_messages']:,}")
     return "\n".join(lines).rstrip()

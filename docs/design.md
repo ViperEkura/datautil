@@ -1,54 +1,74 @@
 # datautil design
 
-This document describes the current architecture and the planned validation extension. Planned commands and fields below are design proposals; they are not available in the CLI yet.
+This document describes the current architecture and planned extensions. Status is stated per feature; a class in a diagram does not by itself imply a public Python interface.
 
-## Processing model
+## Implemented package architecture
 
-`DatasetRecord` is the unit of processing. It contains a stable record ID, one complete conversation, its source location, and metadata. A `Conversation` contains ordered messages. Format adapters parse source records into this model and serialize it into an output format. Operations consume records and produce datasets or reports; the pipeline connects operations without defining another record format.
+The distribution keeps the standard `src/datautil` layout. Dependencies flow from the
+CLI and application layer into the conversation or pretraining domain, and from
+those domains into `common`:
 
-```mermaid
-classDiagram
-    class DatasetRecord {
-        +record_id
-        +conversation
-        +source_location
-        +metadata
-    }
-    class Conversation {
-        +messages
-    }
-    class FormatAdapter {
-        <<interface>>
-        +parse(raw) DatasetRecord
-        +serialize(record) RawRecord
-    }
-    class YamlFormatAdapter
-    class CheckSet {
-        +record_checks
-        +dataset_checks
-    }
-    class ValidationIssue {
-        +code
-        +location
-        +record_id
-        +check
-        +message
-    }
-    class ValidationRunner {
-        +run(input, source, target, checks) Report
-    }
-    class PipelineRunner {
-        +run(config) OperationResult
-    }
-    DatasetRecord *-- Conversation
-    FormatAdapter <|.. YamlFormatAdapter
-    ValidationRunner --> FormatAdapter
-    ValidationRunner --> CheckSet
-    ValidationRunner --> ValidationIssue
-    PipelineRunner --> FormatAdapter
+```text
+src/datautil/
+  cli.py, __main__.py       command-line presentation
+  application/              shared parser, CommandSpec/CommandResult, dispatch, pipeline
+  conversation/             conversation model, format profiles, validation,
+                            analysis, transformation, dedup, classification, sampling
+  pretrain/                 independent document model, JSONL/Parquet sources,
+                            quality, dedup, recipe validation, corpus runner
+  common/                   DataError/Issue, JSONL and atomic output, disk index
 ```
 
-`CheckSet`, `ValidationIssue.check`, and the proposed validation runner are planned interfaces. The current implementation has `validate()` in `operations.py` and uses the existing `Issue` type.
+`Conversation` and `DocumentRecord` are separate models with no shared record
+base class. The format registry is scoped to one command execution. YAML profiles
+cannot leak into later CLI or pipeline steps. JSONL and Parquet document sources
+implement the same reading protocol; the pretraining runner chooses one from the
+recipe and performs quality checks, document dedup, paragraph dedup, post-dedup
+quality recheck, mixing, and writing. Dedup index updates for one candidate
+document commit or roll back together.
+
+CLI arguments and pipeline steps become `CommandSpec(name, options)`; the
+application dispatcher returns `CommandResult(exit_code, summary, datasets,
+reports)`. The CLI renders messages and exit codes. The pipeline resolves
+relative paths and `@step_id` references before calling the dispatcher, and
+stops on the first nonzero status. `pretrain run` remains independent of the
+generic YAML pipeline.
+
+The stable Python exports are `Conversation`, `DatasetRecord`, `Message`,
+`ToolCall`, `YamlFormatAdapter`, `load_profiles`, and `__version__` from
+`datautil`. Internal module paths moved in this refactor; callers should use
+the CLI or those package exports. Generated `build/`, `dist/`, and
+`*.egg-info` are excluded from source migration.
+
+## Pretraining document format (P0)
+
+`record_id` identifies the source document and stays stable when text is
+cleaned. `source_location` points to the original file and row. Optional URL,
+crawl time, language, license, and source-specific fields stay in `metadata`
+without invented values. Current reports record input and recipe fingerprints;
+explicit adapter versions and paragraph character offsets remain planned.
+
+The first interchange format is UTF-8 document JSONL, one complete document per line:
+
+```json
+{"id":"source-0001","text":"First paragraph.\n\nSecond paragraph.","metadata":{"source":"web","url":"https://example.org/page"}}
+```
+
+Preserve embedded newlines in `text`; a physical JSONL line is one document, not one paragraph. `pretrain run` reads generic JSONL and Parquet rows and maps their fields with YAML, including C4-style exports. PyArrow is a default dependency. Plain `.txt`, compressed shards, and a standalone document conversion command remain planned. Token IDs, tokenizer version, sequence packing, and training splits belong to a separate training export, since they depend on a particular model recipe. Do not put perplexity or dedup decisions into the source document body; write keyed score and decision artifacts.
+
+The initial implementation round-trips text and JSON-compatible metadata through document JSONL or Parquet, derives IDs when absent, streams input batches, and stores corpus state in temporary SQLite files. Tests cover mixed JSONL/Parquet sources, metadata mapping, duplicate removal, and deterministic output. Remaining acceptance work includes broader malformed-row coverage, explicit cross-kind conversion diagnostics, and large-corpus disk and memory benchmarks.
+
+## Pretraining quality and deduplication (P0)
+
+The first `gopher` and `c4` presets in `pretrain/quality.py` are explicitly opt-in English subsets, not exact reproductions of the original pipelines. They report rejection checks with measured values and thresholds; `quality.language: en` is required. Generic character limits work without a language preset. Full rule coverage, per-threshold overrides, versioned preset semantics, per-rule pass counts, and a labeled-sample benchmark remain planned. English-specific heuristics must not be silently applied to non-English or code corpora. See the [Gopher paper](https://arxiv.org/abs/2112.11446) and [T5/C4 paper](https://www.jmlr.org/papers/v21/20-074.html).
+
+`pretrain run` performs document-level exact and near deduplication, then removes repeated paragraphs split at blank lines. Its MinHash band buckets and candidate shingle sets live in temporary SQLite files; each LSH candidate still receives exact Jaccard verification. Candidate overflow fails explicitly. The optional decisions artifact records kept IDs, similarity, and paragraph index, and the operation applies these decisions immediately. A separate scan/review/apply workflow, character-span annotations, benchmarked peak memory and temporary disk use, and comparison with conversation dedup remain planned. Source order sets duplicate precedence; the subsequent document-count mix is computed from surviving documents.
+
+## Local scoring and benchmark protection
+
+P1 perplexity scoring uses an AstrAI-trained small LM served locally on the eight-RTX-5090 host. The CLI streams documents in batches to the serving endpoint and writes `record_id`, token count, total negative log-likelihood, mean negative log-likelihood, perplexity, model and tokenizer identifiers, context window, stride, and failures to a separate artifact. There is no third-party API charge, but GPU time and serving capacity still need budgeting. Define truncation and sliding-window behavior, retry semantics, and deterministic ordering before using scores as filters. Calibrate score distributions by language and source; a global perplexity cutoff would mix unlike populations.
+
+Benchmark decontamination should precede evaluation-driven recipe selection. Build versioned protected references for MMLU, HumanEval, and GSM8K from the exact evaluation snapshots in use. Normalize prose and code separately, index configurable word/token n-grams, retrieve candidates, and verify overlap spans against source documents before quarantine or removal. Report benchmark, split, reference version, normalization, n, matched span, document ID, and decision; keep train and evaluation references separate. Common short phrases are not sufficient evidence by themselves, and n-gram matching does not catch paraphrases or translated copies. Compare evaluation results on full and clean subsets and do not treat a contaminated score as a clean capability estimate. The [GPT-3 paper](https://arxiv.org/abs/2005.14165) documents an n-gram overlap analysis; [rephrasing research](https://arxiv.org/abs/2311.04850) describes a limitation of surface matching.
 
 ## Validation layers
 
@@ -99,22 +119,19 @@ The existing `--report` remains a JSONL summary artifact. A planned issue entry 
 - `sample` and `split` use a seed. `split --groups` keeps grouped records in one partition.
 - `run` executes configured steps in order and passes prior outputs by `@step_id`.
 
-## Roadmap
+## Prioritized roadmap
 
-The following phases are ordered by dependency, not by calendar date. Each phase should be reviewable and tested before starting the next. Ordinary feature commits do not require a version bump; a release can bundle several completed phases.
+The user-set priority is pretraining data support. Each item should be reviewable and tested before the next depends on it. Ordinary feature commits do not require a version bump; a release can bundle several completed items.
 
-| Phase | Scope | Acceptance |
+| Priority | Work | Acceptance |
 |---|---|---|
-| 1. Reliable validation | Malformed JSONL recovery, duplicate IDs, accurate totals, and `--max-errors` are implemented; explicit partial-scan reporting for unrecoverable JSON arrays remains | A bad JSONL row does not hide later rows; duplicate locations and truncation are explicit; exit codes remain stable |
-| 2. Configurable checks | Add `--checks` with a versioned YAML schema for roles, message counts, content length, user presence, and tool-result relationships | Invalid configurations fail before input processing; checks do not mutate data; `--checks` and `--to` work together |
-| 3. Clearer statistics | Add an ASCII percentage view for `stats` while keeping JSON available through `--json`; keep count and denominator visible | Domain and usage totals match the JSON output; empty labels and mixed label fields have defined behavior |
-| 4. Scale and reproducibility | Stream sample, split, classify, and dedup apply; keep dedup scan's text and shingles on disk; continue measuring the in-memory LSH index | Benchmarks record dataset size, peak memory, runtime, and output equivalence or documented selection differences |
-| 5. Classification workflow | Record classifier settings and label-config fingerprints, make failures easy to retry, and document data sent to external endpoints | Retrying failures does not relabel successful records; `stats` remains completely offline |
-| 6. Extension boundary | Stabilize the YAML format and check schemas; evaluate a Python adapter interface only when a real format cannot be expressed in YAML | Existing profiles remain readable; new adapters pass the same round-trip and loss checks as built-ins |
-| 7. ClickHouse integration | Consider direct database reads only after exported `JSONEachRow` workflows and streaming behavior are stable | An optional dependency keeps ordinary installations lightweight; connection tests use a disposable database |
-| 8. Release readiness | Decide the PyPI distribution name, publish supported Python and platform versions, and bundle changes into an intentional release | A clean wheel install passes the CLI smoke checks and the full test suite on Windows and Linux |
+| P0.1 | Document records, JSONL/Parquet mapping, and deterministic document-count mixing: initial implementation available | Add broader format/error coverage and large-corpus benchmarks |
+| P0.2 | Opt-in Gopher/C4 rule subsets: initial implementation available | Complete and version the presets, expose threshold overrides, and audit pass/reject distributions |
+| P0.3 | Document and paragraph dedup with disk-backed LSH buckets: initial implementation available | Add a separate review/apply flow, stable span offsets, and measured disk/memory limits |
+| P0.4 | Add MMLU, HumanEval, and GSM8K n-gram overlap screening before evaluation-driven recipe choices | Reports name the exact benchmark snapshot and matched spans; clean-subset scores are distinguishable from full-set scores |
+| P1 | Score documents with the locally served AstrAI small LM | Score artifact records model/tokenizer and token accounting; retries and failures are explicit; no external API is required |
 
-The next implementation target is the remaining JSON-array error reporting in phase 1, followed by phase 2. Tests should cover unrecoverable arrays, invalid checks configuration, record and dataset checks, combined `--checks` and `--to`, and proof that validation leaves input unchanged. The design document and usage guide should be updated whenever CLI behavior or report fields change.
+The earlier validation plan remains in the [validation layers](#validation-layers) section, but its remaining JSON-array partial-scan marker and configurable `--checks` are now backlog work. ASCII label statistics, classifier retry support, a Python adapter extension boundary, direct ClickHouse reads, and release readiness also remain backlog items. Keep the existing large-file benchmarks as a baseline for the document work. Update the design and usage guides whenever behavior or report fields change.
 
 ### Large-file benchmark (phase 4, partial)
 
@@ -134,3 +151,15 @@ Measured on 5090x8 with Python 3.12 and `/usr/bin/time`, using 100,000 synthetic
 These are local measurements, not performance guarantees. The 5,000-record scan generated over three million LSH candidates; its cost is highly dependent on input similarity. Further work should benchmark less repetitive datasets, measure temporary disk use, and evaluate a disk-backed candidate index without changing the exact-match and Jaccard checks.
 
 A separate split of the 100,000-record file with 10,000 two-record groups used 31 MiB peak RSS and 4.66 seconds. It produced 10,000 test records and no group crossed partitions. Replaying stdin through a temporary file preserves the original `-:line` source location, so generated record IDs remain deterministic.
+
+
+### Pretraining document benchmark (synthetic)
+
+Run `.venv/bin/python benchmarks/pretrain_corpus.py --rows N` on 5090x8 (Python 3.12) to reproduce this workload. The generator writes three roughly 60-word paragraphs per document, makes every twentieth document an exact copy of its predecessor, and reuses a middle paragraph in every tenth newly generated document. The recipe uses document near-dedup at 0.8, paragraph exact dedup at 1.0, `quality.min_chars: 200`, and selects half the input count. These are synthetic measurements, not throughput or duplicate-rate estimates for a real corpus.
+
+| Input documents | Input size | Output documents | Elapsed | Peak RSS | Observed peak temp files | LSH candidates |
+|---|---:|---:|---:|---:|---:|---:|
+| 20,000 | 29.9 MiB | 10,000 | 75.2 s | 130.1 MiB | 383.7 MiB | 124,004 |
+| 50,000 | 74.8 MiB | 25,000 | 239.6 s | 129.4 MiB | 965.0 MiB | 750,323 |
+
+The benchmark polls temporary file sizes every 0.1 seconds, so the reported disk peak is an observed lower bound. Both runs had no shortfall; they removed 1,000 and 2,500 repeated paragraphs, respectively. Temporary files used about 13 times the JSONL input size. The 2.5-fold increase in rows took 3.2 times as long, with six times as many LSH candidates; candidate-heavy or longer real documents may behave differently. Benchmark real source samples and reserve temporary space before a production run.

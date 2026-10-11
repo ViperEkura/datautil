@@ -1,4 +1,3 @@
-from .cli import main
+from datautil.cli import main
 
 raise SystemExit(main())
-

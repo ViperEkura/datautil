@@ -5,10 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datautil-llm-dev"
 version = "0.3.0"
-description = "Inspect, convert, deduplicate, classify, and split conversation datasets"
+description = "Inspect, convert, deduplicate, and prepare conversation and pretraining datasets"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["PyYAML>=6.0", "datasketch>=2.0,<3"]
+dependencies = ["PyYAML>=6.0", "datasketch>=2.0,<3", "pyarrow>=15"]
 
 [project.scripts]
 datautil = "datautil.cli:main"

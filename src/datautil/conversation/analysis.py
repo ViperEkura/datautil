@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import re
 import math
+import re
 import tempfile
 from collections import Counter
 from contextlib import nullcontext
 from typing import Any
 
-from .io import output_writer
-from .formats import ADAPTERS
-from .model import DatasetRecord
-from .operations import read_records
-from .streaming import DiskIndex
-
+from datautil.common.index import DiskIndex
+from datautil.common.io import output_writer
+from datautil.conversation.formats import ADAPTERS
+from datautil.conversation.model import DatasetRecord
+from datautil.conversation.reader import read_records
 
 _THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 _ROLES = ("system", "developer", "user", "assistant", "tool")
@@ -37,10 +36,16 @@ def _quantile(items: list[tuple[int, int]], proportion: float) -> float:
     return at(lower) * (1 - fraction) + at(math.ceil(position)) * fraction
 
 
-def _histogram(values: Counter[int], *, separate_zero: bool = False, max_bins: int = 12) -> tuple[dict[str, int], str]:
+def _histogram(
+    values: Counter[int], *, separate_zero: bool = False, max_bins: int = 12
+) -> tuple[dict[str, int], str]:
     """Use Freedman-Diaconis widths, Sturges for zero IQR, and a display cap."""
     result = {"0": values[0]} if separate_zero and values[0] else {}
-    items = sorted((value, count) for value, count in values.items() if count and (value != 0 or not separate_zero))
+    items = sorted(
+        (value, count)
+        for value, count in values.items()
+        if count and (value != 0 or not separate_zero)
+    )
     if not items:
         return result, "empty"
     minimum, maximum = items[0][0], items[-1][0]
@@ -74,13 +79,19 @@ def analyze_record(record: DatasetRecord) -> dict[str, Any]:
     result_ids: set[str] = set()
     chain_lengths: list[int] = []
     current_chain = max_parallel_calls = 0
-    role_counts: Counter[str] = Counter(message.role for message in record.conversation.messages)
-    content_chars = sum(len(message.content) for message in record.conversation.messages)
+    role_counts: Counter[str] = Counter(
+        message.role for message in record.conversation.messages
+    )
+    content_chars = sum(
+        len(message.content) for message in record.conversation.messages
+    )
 
     for message in record.conversation.messages:
         if message.role == "assistant":
             blocks = _THINK_BLOCK.findall(message.content)
-            if message.content.count("<think>") != len(blocks) or message.content.count("</think>") != len(blocks):
+            if message.content.count("<think>") != len(blocks) or message.content.count(
+                "</think>"
+            ) != len(blocks):
                 malformed_thinking_messages += 1
             if message.thinking is not None and blocks:
                 duplicate_sources += 1
@@ -108,14 +119,26 @@ def analyze_record(record: DatasetRecord) -> dict[str, Any]:
 
     if current_chain:
         chain_lengths.append(current_chain)
-    sources = [source for source, count in (("field", field_messages), ("tag", tag_messages)) if count]
+    sources = [
+        source
+        for source, count in (("field", field_messages), ("tag", tag_messages))
+        if count
+    ]
     return {
         "record_id": record.record_id,
         "message_count": len(record.conversation.messages),
         "role_counts": {role: role_counts[role] for role in _ROLES},
         "content_chars": content_chars,
-        "user_chars": sum(len(message.content) for message in record.conversation.messages if message.role == "user"),
-        "assistant_chars": sum(len(message.content) for message in record.conversation.messages if message.role == "assistant"),
+        "user_chars": sum(
+            len(message.content)
+            for message in record.conversation.messages
+            if message.role == "user"
+        ),
+        "assistant_chars": sum(
+            len(message.content)
+            for message in record.conversation.messages
+            if message.role == "assistant"
+        ),
         "thinking_observed": bool(thinking_messages),
         "thinking_chars": thinking_chars,
         "thinking_messages": thinking_messages,
@@ -131,9 +154,13 @@ def analyze_record(record: DatasetRecord) -> dict[str, Any]:
     }
 
 
-def analyze_dataset(input_path: str, output_path: str | None, source_format: str | None) -> dict[str, Any]:
+def analyze_dataset(
+    input_path: str, output_path: str | None, source_format: str | None
+) -> dict[str, Any]:
     observed_format = source_format
-    count = thinking_records = thinking_chars = tool_records = tool_calls = unanswered_calls = malformed = 0
+    count = thinking_records = thinking_chars = tool_records = tool_calls = (
+        unanswered_calls
+    ) = malformed = 0
     messages_total = content_chars_total = 0
     chain_histogram: Counter[int] = Counter()
     max_chain_histogram: Counter[int] = Counter()
@@ -142,7 +169,13 @@ def analyze_dataset(input_path: str, output_path: str | None, source_format: str
     message_lengths: Counter[int] = Counter()
     content_lengths: Counter[int] = Counter()
     thinking_lengths: Counter[int] = Counter()
-    with tempfile.TemporaryDirectory(prefix="datautil-analyze-") as directory, DiskIndex(directory) as index, (output_writer(output_path, "jsonl") if output_path else nullcontext(None)) as writer:
+    with (
+        tempfile.TemporaryDirectory(prefix="datautil-analyze-") as directory,
+        DiskIndex(directory) as index,
+        (
+            output_writer(output_path, "jsonl") if output_path else nullcontext(None)
+        ) as writer,
+    ):
         for record in read_records(input_path, source_format, id_index=index):
             observed_format = record.source_format
             row = analyze_record(record)
@@ -168,11 +201,19 @@ def analyze_dataset(input_path: str, output_path: str | None, source_format: str
     source_labels: Counter[str] = Counter()
     for role, role_count in roles.items():
         if role_count:
-            source_labels[adapter.display_label(role) if adapter else role] += role_count
+            source_labels[adapter.display_label(role) if adapter else role] += (
+                role_count
+            )
     message_distribution, message_method = _histogram(message_lengths)
-    content_distribution, content_method = _histogram(content_lengths, separate_zero=True)
-    thinking_distribution, thinking_method = _histogram(thinking_lengths, separate_zero=True)
-    chain_distribution, chain_method = _histogram(max_chain_histogram, separate_zero=True)
+    content_distribution, content_method = _histogram(
+        content_lengths, separate_zero=True
+    )
+    thinking_distribution, thinking_method = _histogram(
+        thinking_lengths, separate_zero=True
+    )
+    chain_distribution, chain_method = _histogram(
+        max_chain_histogram, separate_zero=True
+    )
     return {
         "source_format": observed_format,
         "source_label_heading": adapter.label_heading if adapter else "Message roles",
@@ -186,7 +227,14 @@ def analyze_dataset(input_path: str, output_path: str | None, source_format: str
         "content_chars_distribution": content_distribution,
         "thinking_chars_distribution": thinking_distribution,
         "tool_chain_bucket_distribution": chain_distribution,
-        "histogram_binning": {"message_count": message_method, "content_chars": content_method, "thinking_chars": thinking_method, "tool_chain": chain_method, "max_bins": 12, "zero_bucket": "separate"},
+        "histogram_binning": {
+            "message_count": message_method,
+            "content_chars": content_method,
+            "thinking_chars": thinking_method,
+            "tool_chain": chain_method,
+            "max_bins": 12,
+            "zero_bucket": "separate",
+        },
         "thinking_observed_records": thinking_records,
         "thinking_chars_total": thinking_chars,
         "thinking_source_counts": dict(source_counts),
@@ -194,6 +242,10 @@ def analyze_dataset(input_path: str, output_path: str | None, source_format: str
         "tool_records": tool_records,
         "tool_call_count": tool_calls,
         "unanswered_tool_calls": unanswered_calls,
-        "tool_chain_length_distribution": {str(key): value for key, value in sorted(chain_histogram.items())},
-        "max_tool_chain_length_distribution": {str(key): value for key, value in sorted(max_chain_histogram.items())},
+        "tool_chain_length_distribution": {
+            str(key): value for key, value in sorted(chain_histogram.items())
+        },
+        "max_tool_chain_length_distribution": {
+            str(key): value for key, value in sorted(max_chain_histogram.items())
+        },
     }

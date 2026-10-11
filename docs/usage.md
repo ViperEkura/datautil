@@ -53,6 +53,52 @@ datautil convert clickhouse-inference.jsonl -o /tmp/clickhouse-openai.jsonl \
 
 `examples/custom-chat.yaml` demonstrates nested message fields and role mapping. `--format-config` maps fields; it does not define data quality rules.
 
+## Prepare pretraining documents
+
+`datautil pretrain run RECIPE.yaml` processes documents rather than conversations. It reads JSONL and Parquet directly. Install the normal package; `pyarrow` is a default dependency. A JSONL physical line or a Parquet row is one complete document, including any embedded paragraph newlines.
+
+```yaml
+version: 1
+sources:
+  - name: web
+    input: web.jsonl
+    weight: 3
+    fields:
+      id: doc_id
+      text: page.body
+      metadata:
+        url: url
+  - name: books
+    input: books.parquet
+    weight: 1
+    fields:
+      id: book_id
+      text: text
+mix:
+  count: 100000
+  seed: 42
+quality:
+  min_chars: 100
+dedup:
+  document: {threshold: 0.8, shingle_size: 5, max_candidates: 10000}
+  paragraph: {threshold: 1.0, min_chars: 80}
+output: pretrain.parquet
+report: pretrain-report.jsonl
+decisions: pretrain-decisions.jsonl
+```
+
+Paths are relative to the recipe. `fields.text` is required; `fields.id` defaults to `id`. Dotted paths map nested JSON objects, and `fields.metadata` renames selected source fields. Other source columns are preserved in metadata by default; set `fields.preserve_extra: false` to keep only mapped metadata. An absent ID is derived from the source name and row location. IDs must be unique across all sources. Output JSONL uses `id`, `text`, and `metadata`; output Parquet uses `id`, `text`, and a JSON-encoded `metadata_json` column to keep a stable schema.
+
+The `mix.count` unit is **documents**. Weights determine target shares after filtering and deduplication. If a source runs out, its unused quota is redistributed; if all sources run out, the report records a shortfall. The seed makes selection and output order repeatable. Source order determines which copy is kept when a duplicate appears in more than one source. The report includes source fingerprints, available and selected counts, and realized shares.
+
+`dedup.document` and `dedup.paragraph` can be omitted independently. Exact matches use normalized text hashes; near matches use on-disk MinHash LSH buckets and exact Jaccard verification. `threshold: 1` compares exact character-shingle sets without LSH. LSH can miss near duplicates. Paragraphs are split at blank lines; removing one changes that document's text. Short paragraphs below `min_chars` are left intact. The optional `decisions` file records quality rejections, duplicate documents, and removed paragraphs. A query exceeding `max_candidates` fails explicitly. Processing uses temporary SQLite files containing document text and indexes, so allow disk space comparable to the corpus.
+
+The default `normalization: nfkc` folds Unicode compatibility forms and whitespace while preserving letter case, which matters for code. Set `normalization: nfkc_casefold` for case-insensitive matching or `normalization: none` for exact Unicode text comparison. Each dedup stage can choose its own setting.
+
+Quality checks are opt-in. `min_chars` and `max_chars` work for all languages. `quality.presets: [gopher, c4]` enables an initial, documented subset of English Gopher/C4 heuristics and requires `quality.language: en`; these checks are not a byte-for-byte recreation of the original pipelines. The decisions file records measured values and thresholds for rejected documents. After paragraph deduplication changes a document, quality checks run again. A document that then fails is dropped, its dedup index entries are rolled back, and the report increments `quality_rejected_after_dedup`. Do not apply the English presets to code or multilingual corpora without adapting the rules.
+
+The repository example is [`examples/pretrain.yaml`](../examples/pretrain.yaml); change its input and output paths before running it. This command does not tokenize or pack sequences for a training framework.
+
 ## Analyze conversations
 
 ```bash

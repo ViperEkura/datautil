@@ -33,21 +33,3 @@ class DatasetRecord:
     source_location: str
     metadata: dict[str, Any] = field(default_factory=dict)
     source_format: str | None = None
-
-
-@dataclass(frozen=True)
-class Issue:
-    code: str
-    message: str
-    location: str
-    record_id: str | None = None
-
-    def as_dict(self) -> dict[str, Any]:
-        return {"code": self.code, "message": self.message, "location": self.location, "record_id": self.record_id}
-
-
-class DataError(Exception):
-    def __init__(self, code: str, message: str, location: str = "") -> None:
-        super().__init__(message)
-        self.code = code
-        self.location = location

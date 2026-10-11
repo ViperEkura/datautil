@@ -5,7 +5,9 @@ from pathlib import Path
 
 
 def write_jsonl(path, values):
-    path.write_text("".join(json.dumps(item) + "\n" for item in values), encoding="utf-8")
+    path.write_text(
+        "".join(json.dumps(item) + "\n" for item in values), encoding="utf-8"
+    )
 
 
 class DatautilTestCase(unittest.TestCase):

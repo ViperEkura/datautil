@@ -1,4 +1,4 @@
-# Track only source, tests, configuration examples, and documentation.
+# Track source, tests, configuration examples, documentation, and benchmark harnesses.
 *
 
 !/.gitignore
@@ -9,6 +9,8 @@
 !/src/
 !/src/datautil/
 !/src/datautil/*.py
+!/src/datautil/**/
+!/src/datautil/**/*.py
 
 !/tests/
 !/tests/*.py

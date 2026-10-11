@@ -1,6 +1,6 @@
 # datautil
 
-CLI for inspecting and preparing conversation datasets. The command is `datautil`; the current wheel distribution name is `datautil-llm-dev`.
+CLI for inspecting and preparing conversation and pretraining datasets. The command is `datautil`; the current wheel distribution name is `datautil-llm-dev`.
 
 ## Install
 
@@ -9,7 +9,8 @@ python -m pip install .
 datautil --help
 ```
 
-Python 3.10+ is required. Runtime dependencies are `PyYAML` and `datasketch`.
+Python 3.10+ is required. Runtime dependencies are `PyYAML`, `datasketch`, and `pyarrow`.
+The wheel includes the `application`, `common`, `conversation`, and `pretrain` packages under `src/datautil`. Build from a clean checkout so generated `build/` contents cannot enter the wheel.
 
 See the [usage guide](docs/usage.md) for command examples, the [design document](docs/design.md) for architecture and planned changes, and [CONTRIBUTING.md](CONTRIBUTING.md) for development conventions.
 
@@ -34,7 +35,10 @@ datautil stats usage-labels.jsonl
 datautil sample unique.jsonl -o sample.jsonl --count 100 --seed 42
 datautil split unique.jsonl --train train.jsonl --test test.jsonl --groups groups.jsonl --seed 42
 datautil run pipeline.yaml
+datautil pretrain run examples/pretrain.yaml
 ```
+
+`pretrain run` reads document JSONL or Parquet, maps text and metadata fields with YAML, applies optional quality checks and document/paragraph deduplication, then selects a deterministic document-count mix. Edit the input paths and output paths in [`examples/pretrain.yaml`](examples/pretrain.yaml) before running it. The report gives available and selected counts per source and flags any shortfall. Document output can be `.jsonl` or `.parquet`; the latter stores metadata as JSON in a `metadata_json` column. Temporary SQLite indexes need disk space. See the [usage guide](docs/usage.md) for configuration details.
 
 Classification calls an external OpenAI-compatible `/chat/completions` endpoint. `--model` is the model ID served by that endpoint (for example, the name supplied by your provider), not a model bundled with `datautil`. Set `DATAUTIL_API_KEY`; set `DATAUTIL_MODEL` to omit `--model` on each run. `DATAUTIL_API_BASE_URL` selects a compatible endpoint. Only `classify` makes model calls and incurs provider costs. The command requires `--sample N` or `--all`. By default, `--type subject` assigns exactly one primary subject label per conversation:
 

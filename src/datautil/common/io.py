@@ -8,13 +8,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, TextIO
 
-from .model import DataError
+from datautil.common.errors import DataError
 
 
 def container_for(path: str, override: str = "auto") -> str:
     if override != "auto":
         return override
-    return "jsonl" if path == "-" or path.lower().endswith((".jsonl", ".ndjson")) else "json"
+    return (
+        "jsonl"
+        if path == "-" or path.lower().endswith((".jsonl", ".ndjson"))
+        else "json"
+    )
 
 
 def _iter_json_array(stream: TextIO) -> Iterator[tuple[int, Any]]:
@@ -56,13 +60,23 @@ def _iter_json_array(stream: TextIO) -> Iterator[tuple[int, Any]]:
                 break
             fill()
         if pos >= len(buffer):
-            raise DataError("invalid_json", "Unclosed JSON array", f"record {index + 1}")
+            raise DataError(
+                "invalid_json", "Unclosed JSON array", f"record {index + 1}"
+            )
         if buffer[pos] == "]":
             if after_comma:
-                raise DataError("invalid_json", "Trailing comma in JSON array", f"record {index + 1}")
+                raise DataError(
+                    "invalid_json",
+                    "Trailing comma in JSON array",
+                    f"record {index + 1}",
+                )
             pos += 1
             if (buffer[pos:] + stream.read()).strip():
-                raise DataError("invalid_json", "Trailing content after array", f"record {index + 1}")
+                raise DataError(
+                    "invalid_json",
+                    "Trailing content after array",
+                    f"record {index + 1}",
+                )
             return
         while True:
             try:
@@ -71,7 +85,9 @@ def _iter_json_array(stream: TextIO) -> Iterator[tuple[int, Any]]:
                 break
             except json.JSONDecodeError as exc:
                 if eof:
-                    raise DataError("invalid_json", str(exc), f"record {index + 1}") from exc
+                    raise DataError(
+                        "invalid_json", str(exc), f"record {index + 1}"
+                    ) from exc
                 fill()
         index += 1
         after_comma = False
@@ -83,24 +99,38 @@ def _iter_json_array(stream: TextIO) -> Iterator[tuple[int, Any]]:
                 break
             fill()
         if pos >= len(buffer):
-            raise DataError("invalid_json", "Unclosed JSON array", f"record {index + 1}")
+            raise DataError(
+                "invalid_json", "Unclosed JSON array", f"record {index + 1}"
+            )
         if buffer[pos] == ",":
             pos += 1
             after_comma = True
             continue
         if buffer[pos] == "]":
             if after_comma:
-                raise DataError("invalid_json", "Trailing comma in JSON array", f"record {index + 1}")
+                raise DataError(
+                    "invalid_json",
+                    "Trailing comma in JSON array",
+                    f"record {index + 1}",
+                )
             pos += 1
             if (buffer[pos:] + stream.read()).strip():
-                raise DataError("invalid_json", "Trailing content after array", f"record {index + 1}")
+                raise DataError(
+                    "invalid_json",
+                    "Trailing content after array",
+                    f"record {index + 1}",
+                )
             return
         raise DataError("invalid_json", "Expected ',' or ']'", f"record {index + 1}")
 
 
-def iter_raw(path: str, container: str = "auto", errors: str = "raise") -> Iterator[tuple[str, Any]]:
+def iter_raw(
+    path: str, container: str = "auto", errors: str = "raise"
+) -> Iterator[tuple[str, Any]]:
     kind = container_for(path, container)
-    stream = sys.stdin if path == "-" else open(path, "r", encoding="utf-8-sig", newline="")
+    stream = (
+        sys.stdin if path == "-" else open(path, "r", encoding="utf-8-sig", newline="")
+    )
     try:
         if kind == "jsonl":
             for number, line in enumerate(stream, 1):
@@ -132,7 +162,9 @@ def output_writer(path: str, container: str = "auto") -> Iterator["RecordWriter"
         return
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
             writer = RecordWriter(stream, kind)
