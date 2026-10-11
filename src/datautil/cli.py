@@ -4,7 +4,9 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import sys
+import tempfile
 from collections import Counter
 from typing import Any
 
@@ -13,11 +15,11 @@ from .analysis import analyze_dataset
 from .formats import ADAPTERS
 from .io import iter_raw, output_writer
 from .model import DataError, Issue
-from .operations import (OpenAICompatibleClassifier, convert, dedup_apply, dedup_scan,
-                         detect, inspect, load_groups, load_labels, read_records,
-                         sample_records, split_records, validate)
+from .operations import (OpenAICompatibleClassifier, convert, dedup_scan,
+                         detect, inspect, load_labels, read_records, validate)
 from .profiles import load_profiles
 from .rules import load_rules, transform_dataset, validate_rules
+from .streaming import DiskIndex, dedup_apply_file, replayable_input, sample_file, source_format, split_file
 from .terminal import render_analysis
 
 
@@ -55,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     validation.add_argument("input")
     validation.add_argument("--from", dest="source_format")
     validation.add_argument("--to", dest="target_format")
+    validation.add_argument("--max-errors", type=int, default=1000, metavar="N", help="Maximum issue details to retain; the full issue count is still reported")
     validation.add_argument("--report")
     profile_option(validation)
 
@@ -168,28 +171,6 @@ def _report(args: argparse.Namespace, result: dict[str, Any], *, to_stdout: bool
     print(display, file=sys.stdout if to_stdout else sys.stderr)
 
 
-def _write_records(path: str, records: list[Any], adapter_name: str) -> None:
-    with output_writer(path, getattr(ADAPTERS[adapter_name], "container", "auto")) as writer:
-        for record in records:
-            writer.write(ADAPTERS[adapter_name].serialize(record))
-
-
-def _source_format(args: argparse.Namespace, records: list[Any]) -> str:
-    if args.source_format:
-        return args.source_format
-    if args.input == "-":
-        raise DataError("ambiguous_format", "Pass --from when reading from stdin")
-    if not records:
-        raise DataError("empty_dataset", "Cannot infer format from an empty dataset; pass --from")
-    # Preserving the source shape requires explicit detection from the first raw record.
-    first = next(iter_raw(args.input))[1]
-    from .formats import detect_record
-    candidates = detect_record(first)
-    if len(candidates) != 1:
-        raise DataError("ambiguous_format", f"Cannot infer source format: {candidates}")
-    return candidates[0]
-
-
 def _execute(args: argparse.Namespace) -> int:
     if args.command == "formats":
         print(json.dumps({"formats": [{"name": name, "read": True, "write": True, "container": getattr(adapter, "container", "json/jsonl"), "layout": getattr(adapter, "layout", "built-in")} for name, adapter in ADAPTERS.items()]}, ensure_ascii=False))
@@ -209,7 +190,7 @@ def _execute(args: argparse.Namespace) -> int:
         _report(args, result, to_stdout=args.output is None)
         return 0
     if args.command == "validate":
-        result = validate(args.input, args.source_format, args.target_format, "skip")
+        result = validate(args.input, args.source_format, args.target_format, "skip", args.max_errors)
         _report(args, result, to_stdout=True)
         return 1 if result["issue_count"] else 0
     if args.command == "convert":
@@ -228,19 +209,21 @@ def _execute(args: argparse.Namespace) -> int:
         _report(args, result)
         return 0
     if args.command == "dedup":
-        records = list(read_records(args.input, args.source_format))
-        source = _source_format(args, records)
         if args.dedup_command == "scan":
             scan_stats: dict[str, Any] = {}
-            groups = dedup_scan(records, args.threshold, scope=args.scope, stats=scan_stats)
+            with replayable_input(args.input) as replay, tempfile.TemporaryDirectory(prefix="datautil-dedup-ids-") as directory:
+                source = source_format(replay, args.source_format)
+                index = DiskIndex(directory)
+                try:
+                    groups = dedup_scan(read_records(replay, source, id_index=index, location_alias=args.input), args.threshold, scope=args.scope, stats=scan_stats)
+                finally:
+                    index.close()
             with output_writer(args.output, "jsonl") as writer:
                 for group in groups:
                     writer.write(group)
-            _report(args, {"record_count": len(records), "group_count": len(groups), "output": args.output, "threshold": args.threshold, **scan_stats})
+            _report(args, {"group_count": len(groups), "output": args.output, "threshold": args.threshold, **scan_stats})
         else:
-            retained, decisions = dedup_apply(records, load_groups(args.groups))
-            _write_records(args.output, retained, source)
-            _report(args, {"record_count": len(records), "written_count": len(retained), "removed_count": len(decisions), "decisions": decisions})
+            _report(args, dedup_apply_file(args.input, args.groups, args.output, args.source_format))
         return 0
     if args.command == "classify":
         if args.sample is not None and args.sample <= 0:
@@ -251,24 +234,42 @@ def _execute(args: argparse.Namespace) -> int:
         if not api_key:
             raise DataError("missing_api_key", f"Set {args.api_key_env}")
         labels = load_labels(args.labels, args.scheme)
-        records = list(read_records(args.input, args.source_format))
-        chosen = sample_records(records, args.sample, args.seed) if args.sample is not None else records
         classifier = OpenAICompatibleClassifier(args.base_url, args.model, api_key)
         labels_hash = hashlib.sha256(json.dumps(labels, sort_keys=True).encode()).hexdigest()
         counts: Counter[str] = Counter()
         issues = []
-        with output_writer(args.output, "jsonl") as writer:
-            for record in chosen:
-                try:
-                    label = classifier.classify(record, labels, args.scheme)
-                    label_field = "domain" if args.scheme == "subject" else "usage_topic"
-                    writer.write({"record_id": record.record_id, label_field: label, "model": args.model, "labels_sha256": labels_hash})
-                    counts[label] += 1
-                except DataError as exc:
-                    issues.append(Issue(exc.code, str(exc), exc.location, record.record_id).as_dict())
+        issue_count = 0
+        sampled_count = 0
+        with replayable_input(args.input) as replay, tempfile.TemporaryDirectory(prefix="datautil-classify-") as directory:
+            index = DiskIndex(directory)
+            try:
+                if args.sample is None:
+                    chosen_indexes = None
+                    records = read_records(replay, args.source_format, id_index=index, location_alias=args.input)
+                else:
+                    source = source_format(replay, args.source_format)
+                    total = sum(1 for _ in read_records(replay, source, id_index=index, location_alias=args.input))
+                    chosen_indexes = set(random.Random(args.seed).sample(range(total), min(args.sample, total)))
+                    records = read_records(replay, source, check_duplicate_ids=False, location_alias=args.input)
+                with output_writer(args.output, "jsonl") as writer:
+                    for position, record in enumerate(records):
+                        if chosen_indexes is not None and position not in chosen_indexes:
+                            continue
+                        sampled_count += 1
+                        try:
+                            label = classifier.classify(record, labels, args.scheme)
+                            label_field = "domain" if args.scheme == "subject" else "usage_topic"
+                            writer.write({"record_id": record.record_id, label_field: label, "model": args.model, "labels_sha256": labels_hash})
+                            counts[label] += 1
+                        except DataError as exc:
+                            issue_count += 1
+                            if len(issues) < 1000:
+                                issues.append(Issue(exc.code, str(exc), exc.location, record.record_id).as_dict())
+            finally:
+                index.close()
         distribution_key = "domains" if args.scheme == "subject" else "usage_topics"
-        _report(args, {"sampled_count": len(chosen), "classified_count": sum(counts.values()), distribution_key: dict(counts), "issues": issues, "output": args.output})
-        return 1 if issues else 0
+        _report(args, {"sampled_count": sampled_count, "classified_count": sum(counts.values()), distribution_key: dict(counts), "issue_count": issue_count, "issues": issues, "issues_truncated": issue_count > len(issues), "output": args.output})
+        return 1 if issue_count else 0
     if args.command == "stats":
         counts: Counter[str] = Counter()
         total = 0
@@ -290,19 +291,10 @@ def _execute(args: argparse.Namespace) -> int:
         _report(args, {"by": selected, "count": total, selected + "s": dict(counts), "shares": {key: value / total for key, value in counts.items()} if total else {}}, to_stdout=True)
         return 0
     if args.command == "sample":
-        records = list(read_records(args.input, args.source_format))
-        source = _source_format(args, records)
-        chosen = sample_records(records, args.count, args.seed)
-        _write_records(args.output, chosen, source)
-        _report(args, {"record_count": len(records), "sample_count": len(chosen), "seed": args.seed})
+        _report(args, sample_file(args.input, args.output, args.source_format, args.count, args.seed))
         return 0
     if args.command == "split":
-        records = list(read_records(args.input, args.source_format))
-        source = _source_format(args, records)
-        train, test = split_records(records, args.test_ratio, args.seed, load_groups(args.groups) if args.groups else None)
-        _write_records(args.train, train, source)
-        _write_records(args.test, test, source)
-        _report(args, {"record_count": len(records), "train_count": len(train), "test_count": len(test), "seed": args.seed})
+        _report(args, split_file(args.input, args.train, args.test, args.source_format, args.test_ratio, args.seed, args.groups))
         return 0
     if args.command == "run":
         from .pipeline import PipelineRunner

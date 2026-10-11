@@ -4,6 +4,8 @@ import hashlib
 import json
 import random
 import re
+import sqlite3
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.request
@@ -49,7 +51,7 @@ DEFAULT_USAGE_LABELS = {
 }
 
 
-def read_records(path: str, format_name: str | None = None, container: str = "auto") -> Iterable[DatasetRecord]:
+def read_records(path: str, format_name: str | None = None, container: str = "auto", *, id_index: Any = None, check_duplicate_ids: bool = True, location_alias: str | None = None) -> Iterable[DatasetRecord]:
     selected = format_name
     seen_ids: set[str] = set()
     if selected and selected not in ADAPTERS:
@@ -57,6 +59,8 @@ def read_records(path: str, format_name: str | None = None, container: str = "au
     if container == "auto" and selected:
         container = getattr(ADAPTERS[selected], "container", "auto")
     for location, raw in iter_raw(path, container):
+        if location_alias is not None and location.startswith(path):
+            location = location_alias + location[len(path):]
         if selected is None:
             choices = detect_record(raw)
             if len(choices) != 1:
@@ -64,9 +68,13 @@ def read_records(path: str, format_name: str | None = None, container: str = "au
             selected = choices[0]
         record = replace(ADAPTERS[selected].parse(raw, location), source_format=selected)
         validate_record(record)
-        if record.record_id in seen_ids:
-            raise DataError("duplicate_record_id", f"Duplicate record ID {record.record_id!r}", location)
-        seen_ids.add(record.record_id)
+        if check_duplicate_ids:
+            if id_index is None:
+                if record.record_id in seen_ids:
+                    raise DataError("duplicate_record_id", f"Duplicate record ID {record.record_id!r}", location)
+                seen_ids.add(record.record_id)
+            elif not id_index.add_unique(record.record_id):
+                raise DataError("duplicate_record_id", f"Duplicate record ID {record.record_id!r}", location)
         yield record
 
 
@@ -119,31 +127,43 @@ def inspect(path: str, sample: int = 1000, format_name: str | None = None) -> di
     return {"sampled": sampled, "fields": dict(fields), "roles": dict(roles), "message_counts": dict(turns), "issues": issues[:100], "issue_count": len(issues)}
 
 
-def validate(path: str, source: str | None, target: str | None = None, on_error: str = "fail") -> dict[str, Any]:
+def validate(path: str, source: str | None, target: str | None = None, on_error: str = "fail", max_errors: int = 1000) -> dict[str, Any]:
+    if max_errors < 0:
+        raise DataError("invalid_argument", "max_errors must be non-negative")
     if source and source not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {source!r}")
     if target and target not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {target!r}")
     container = getattr(ADAPTERS[source], "container", "auto") if source else "auto"
     count = 0
+    issue_count = 0
     issues: list[dict[str, Any]] = []
-    for location, raw in iter_raw(path, container):
-        count += 1
-        try:
-            selected = source or detect_record(raw)
-            if isinstance(selected, list):
-                if len(selected) != 1:
-                    raise DataError("ambiguous_format", f"Matches {selected}", location)
-                selected = selected[0]
-            record = ADAPTERS[selected].parse(raw, location)
-            validate_record(record)
-            if target:
-                ADAPTERS[target].serialize(record)
-        except DataError as exc:
-            issues.append(Issue(exc.code, str(exc), exc.location or location).as_dict())
-            if on_error == "fail":
-                break
-    return {"read_count": count, "issue_count": len(issues), "issues": issues}
+    from .streaming import DiskIndex
+
+    with tempfile.TemporaryDirectory(prefix="datautil-validate-") as directory, DiskIndex(directory) as index:
+        for location, raw in iter_raw(path, container, errors="yield"):
+            count += 1
+            try:
+                if isinstance(raw, DataError):
+                    raise raw
+                selected = source or detect_record(raw)
+                if isinstance(selected, list):
+                    if len(selected) != 1:
+                        raise DataError("ambiguous_format", f"Matches {selected}", location)
+                    selected = selected[0]
+                record = ADAPTERS[selected].parse(raw, location)
+                validate_record(record)
+                if not index.add_unique(record.record_id, location):
+                    raise DataError("duplicate_record_id", f"Duplicate record ID {record.record_id!r}; first seen at {index.first_location(record.record_id)}", location)
+                if target:
+                    ADAPTERS[target].serialize(record)
+            except DataError as exc:
+                issue_count += 1
+                if len(issues) < max_errors:
+                    issues.append(Issue(exc.code, str(exc), exc.location or location).as_dict())
+                if on_error == "fail":
+                    break
+    return {"read_count": count, "issue_count": issue_count, "issues": issues, "issues_truncated": issue_count > len(issues)}
 
 
 def convert(path: str, output: str, source: str | None, target: str, *, on_error: str = "fail", dry_run: bool = False, input_container: str = "auto", output_container: str = "auto") -> dict[str, Any]:
@@ -175,7 +195,8 @@ def convert(path: str, output: str, source: str | None, target: str, *, on_error
                 report["written_count"] += 1
             except DataError as exc:
                 report["skipped_count"] += 1
-                report["issues"].append(Issue(exc.code, str(exc), exc.location or location).as_dict())
+                if len(report["issues"]) < 1000:
+                    report["issues"].append(Issue(exc.code, str(exc), exc.location or location).as_dict())
                 if on_error == "fail":
                     raise
     if dry_run:
@@ -183,6 +204,7 @@ def convert(path: str, output: str, source: str | None, target: str, *, on_error
     else:
         with output_writer(output, output_container) as writer:
             process(writer)
+    report["issues_truncated"] = report["skipped_count"] > len(report["issues"])
     return report
 
 
@@ -206,16 +228,14 @@ def _shingles(normalized: str, width: int = 5) -> set[str]:
     return {normalized[index:index + width] for index in range(max(1, len(normalized) - width + 1))}
 
 
-def dedup_scan(records: list[DatasetRecord], threshold: float = 0.8, *, scope: str = "conversation", stats: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def dedup_scan(records: Iterable[DatasetRecord], threshold: float = 0.8, *, scope: str = "conversation", stats: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     from datasketch import MinHash, MinHashLSH
 
     if not 0 < threshold <= 1:
         raise DataError("invalid_argument", "threshold must be between 0 and 1")
     if scope not in {"conversation", "user"}:
         raise DataError("invalid_argument", "scope must be conversation or user")
-    # Keep record positions aligned, including records without user text.
-    normalized = [_normalize(value) if value is not None else None for record in records for value in (_text(record, scope),)]
-    unscannable = sum(value is None for value in normalized)
+    unscannable = 0
     lsh = None
     if threshold < 1:
         try:
@@ -224,10 +244,8 @@ def dedup_scan(records: list[DatasetRecord], threshold: float = 0.8, *, scope: s
             if "bands are too small" not in str(exc):
                 raise DataError("invalid_argument", str(exc)) from exc
             lsh = MinHashLSH(threshold=threshold, num_perm=128, params=(2, 64))
-    exact: dict[bytes, list[int]] = defaultdict(list)
-    shingles: dict[int, set[str]] = {}
-    identical_shingles: dict[frozenset[str], int] = {}
-    parent = list(range(len(records)))
+    record_ids: list[str] = []
+    parent: list[int] = []
     matches: dict[tuple[int, int], tuple[float, str]] = {}
     candidate_count = 0
 
@@ -237,49 +255,71 @@ def dedup_scan(records: list[DatasetRecord], threshold: float = 0.8, *, scope: s
             index = parent[index]
         return index
 
-    for index, value in enumerate(normalized):
-        if value is None:
-            continue
-        digest = hashlib.sha256(value.encode("utf-8")).digest()
-        representative = next((other for other in exact[digest] if normalized[other] == value), None)
-        if representative is not None:
-            parent[root(index)] = root(representative)
-            matches[(representative, index)] = (1.0, "exact")
-            continue
-        exact[digest].append(index)
-        tokens = _shingles(value)
-        shingles[index] = tokens
-        if lsh is None:
-            key = frozenset(tokens)
-            other = identical_shingles.setdefault(key, index)
-            if other != index:
-                parent[root(index)] = root(other)
-                matches[(other, index)] = (1.0, "near")
-            continue
-        signature = MinHash(num_perm=128, seed=1)
-        for token in sorted(tokens):
-            signature.update(token.encode("utf-8"))
-        candidates = sorted(lsh.query(signature))
-        candidate_count += len(candidates)
-        for other in candidates:
-            union = tokens | shingles[other]
-            score = len(tokens & shingles[other]) / len(union) if union else 1.0
-            if score >= threshold:
-                parent[root(index)] = root(other)
-                matches[(other, index)] = (round(score, 4), "near")
-        lsh.insert(index, signature)
+    with tempfile.TemporaryDirectory(prefix="datautil-dedup-") as directory:
+        connection = sqlite3.connect(str(Path(directory) / "candidates.sqlite3"))
+        try:
+            connection.execute("PRAGMA journal_mode=OFF")
+            connection.execute("PRAGMA synchronous=OFF")
+            connection.execute("PRAGMA cache_size=-2048")
+            connection.execute("CREATE TABLE representatives (position INTEGER PRIMARY KEY, digest BLOB NOT NULL, normalized TEXT NOT NULL, tokens TEXT NOT NULL)")
+            connection.execute("CREATE INDEX representatives_digest ON representatives (digest)")
+            if lsh is None:
+                connection.execute("CREATE INDEX representatives_tokens ON representatives (tokens)")
+
+            for index, record in enumerate(records):
+                record_ids.append(record.record_id)
+                parent.append(index)
+                raw_text = _text(record, scope)
+                if raw_text is None:
+                    unscannable += 1
+                    continue
+                value = _normalize(raw_text)
+                digest = hashlib.sha256(value.encode("utf-8")).digest()
+                found = connection.execute("SELECT position FROM representatives WHERE digest=? AND normalized=? LIMIT 1", (digest, value)).fetchone()
+                if found is not None:
+                    representative = found[0]
+                    parent[root(index)] = root(representative)
+                    matches[(representative, index)] = (1.0, "exact")
+                    continue
+                tokens = _shingles(value)
+                token_key = json.dumps(sorted(tokens), ensure_ascii=False, separators=(",", ":"))
+                if lsh is None:
+                    found = connection.execute("SELECT position FROM representatives WHERE tokens=? LIMIT 1", (token_key,)).fetchone()
+                    if found is not None:
+                        other = found[0]
+                        parent[root(index)] = root(other)
+                        matches[(other, index)] = (1.0, "near")
+                else:
+                    signature = MinHash(num_perm=128, seed=1)
+                    for token in sorted(tokens):
+                        signature.update(token.encode("utf-8"))
+                    candidates = sorted(lsh.query(signature))
+                    candidate_count += len(candidates)
+                    for other in candidates:
+                        candidate_tokens = set(json.loads(connection.execute("SELECT tokens FROM representatives WHERE position=?", (other,)).fetchone()[0]))
+                        union = tokens | candidate_tokens
+                        score = len(tokens & candidate_tokens) / len(union) if union else 1.0
+                        if score >= threshold:
+                            parent[root(index)] = root(other)
+                            matches[(other, index)] = (round(score, 4), "near")
+                    lsh.insert(index, signature)
+                connection.execute("INSERT INTO representatives VALUES (?, ?, ?, ?)", (index, digest, value, token_key))
+        finally:
+            connection.close()
     groups: dict[int, list[int]] = defaultdict(list)
-    for index in range(len(records)):
+    matched_indexes = {index for pair in matches for index in pair}
+    for index in sorted(matched_indexes):
         groups[root(index)].append(index)
+    matched_pairs: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for (left, right), (score, match) in sorted(matches.items()):
+        matched_pairs[root(left)].append({"a": record_ids[left], "b": record_ids[right], "similarity": score, "match": match})
     result = []
     for members in sorted(groups.values(), key=lambda items: items[0]):
         if len(members) > 1:
-            member_set = set(members)
-            pairs = [{"a": records[a].record_id, "b": records[b].record_id, "similarity": score, "match": match} for (a, b), (score, match) in sorted(matches.items()) if a in member_set and b in member_set]
-            result.append({"group_id": f"g{len(result) + 1}", "record_ids": [records[i].record_id for i in members], "pairs": pairs})
+            result.append({"group_id": f"g{len(result) + 1}", "record_ids": [record_ids[i] for i in members], "pairs": matched_pairs[root(members[0])]})
     if stats is not None:
         algorithm = "exact-sha256+datasketch-minhash-lsh+jaccard" if lsh else "exact-sha256+exact-shingle-jaccard"
-        stats.update({"scope": scope, "algorithm": algorithm, "datasketch_version": version("datasketch"), "shingle_size": 5, "num_perm": 128, "lsh_bands": lsh.b if lsh else 0, "lsh_rows": lsh.r if lsh else 0, "normalization": "NFKC+casefold+whitespace", "unscannable_count": unscannable, "lsh_candidate_count": candidate_count, "exact_pair_count": sum(match == "exact" for _, match in matches.values()), "near_pair_count": sum(match == "near" for _, match in matches.values())})
+        stats.update({"record_count": len(record_ids), "scope": scope, "algorithm": algorithm, "datasketch_version": version("datasketch"), "shingle_size": 5, "num_perm": 128, "lsh_bands": lsh.b if lsh else 0, "lsh_rows": lsh.r if lsh else 0, "normalization": "NFKC+casefold+whitespace", "unscannable_count": unscannable, "lsh_candidate_count": candidate_count, "exact_pair_count": sum(match == "exact" for _, match in matches.values()), "near_pair_count": sum(match == "near" for _, match in matches.values())})
     return result
 
 

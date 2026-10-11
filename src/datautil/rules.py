@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
+import tempfile
 from typing import Any
 
 import yaml
@@ -12,6 +13,7 @@ import yaml
 from .formats import ADAPTERS, validate_record
 from .io import iter_raw, output_writer
 from .model import Conversation, DataError, DatasetRecord
+from .streaming import DiskIndex
 
 
 _ROLES = {"system", "developer", "user", "assistant", "tool"}
@@ -114,14 +116,12 @@ def transform_dataset(input_path: str, output_path: str, source_format: str, rul
     output_container = getattr(adapter, "container", "auto")
     read_count = written_count = 0
     dropped: Counter[int] = Counter()
-    seen_ids: set[str] = set()
-    with output_writer(output_path, output_container) as writer:
+    with tempfile.TemporaryDirectory(prefix="datautil-transform-") as directory, DiskIndex(directory) as index, output_writer(output_path, output_container) as writer:
         for location, raw in iter_raw(input_path, input_container):
             read_count += 1
             record = adapter.parse(raw, location)
-            if record.record_id in seen_ids:
+            if not index.add_unique(record.record_id):
                 raise DataError("duplicate_record_id", f"Duplicate record ID {record.record_id!r}", location)
-            seen_ids.add(record.record_id)
             transformed, drop_index = apply_rules(record, rules)
             if transformed is None:
                 dropped[drop_index] += 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import math
+import tempfile
 from collections import Counter
 from contextlib import nullcontext
 from typing import Any
@@ -12,6 +13,7 @@ from .io import output_writer
 from .formats import ADAPTERS
 from .model import DatasetRecord
 from .operations import read_records
+from .streaming import DiskIndex
 
 
 _THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -140,8 +142,8 @@ def analyze_dataset(input_path: str, output_path: str | None, source_format: str
     message_lengths: Counter[int] = Counter()
     content_lengths: Counter[int] = Counter()
     thinking_lengths: Counter[int] = Counter()
-    with (output_writer(output_path, "jsonl") if output_path else nullcontext(None)) as writer:
-        for record in read_records(input_path, source_format):
+    with tempfile.TemporaryDirectory(prefix="datautil-analyze-") as directory, DiskIndex(directory) as index, (output_writer(output_path, "jsonl") if output_path else nullcontext(None)) as writer:
+        for record in read_records(input_path, source_format, id_index=index):
             observed_format = record.source_format
             row = analyze_record(record)
             if writer is not None:
