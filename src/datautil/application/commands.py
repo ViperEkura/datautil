@@ -226,6 +226,7 @@ def _execute(
         issue_count = 0
         sampled_count = 0
         with (
+            classifier,
             replayable_input(args.input) as replay,
             tempfile.TemporaryDirectory(prefix="datautil-classify-") as directory,
         ):

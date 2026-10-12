@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import yaml
+from openai import APIError, OpenAI
 
 from datautil.common.errors import DataError
 from datautil.conversation.model import DatasetRecord
@@ -63,10 +62,19 @@ class OpenAICompatibleClassifier:
     def __init__(
         self, base_url: str, model: str, api_key: str, timeout: float = 30.0
     ) -> None:
-        self.url = base_url.rstrip("/") + "/chat/completions"
         self.model = model
-        self.api_key = api_key
-        self.timeout = timeout
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=0,
+        )
+
+    def __enter__(self) -> OpenAICompatibleClassifier:
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.client.close()
 
     def classify(
         self, record: DatasetRecord, labels: dict[str, str], scheme: str = "subject"
@@ -102,25 +110,15 @@ class OpenAICompatibleClassifier:
                 {"role": "user", "content": _text(record)},
             ],
         }
-        request = urllib.request.Request(
-            self.url,
-            data=json.dumps(body).encode(),
-            headers={
-                "Authorization": "Bearer " + self.api_key,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                result = json.load(response)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            result = self.client.chat.completions.create(**body)
+        except APIError as exc:
             raise DataError(
                 "classifier_api_error", str(exc), record.source_location
             ) from exc
         try:
-            label = result["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError, AttributeError) as exc:
+            label = result.choices[0].message.content.strip()
+        except (IndexError, TypeError, AttributeError) as exc:
             raise DataError(
                 "classifier_response",
                 "Missing label in API response",

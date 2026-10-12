@@ -141,7 +141,7 @@ datautil classify input.jsonl --from openai-messages --type subject \
 datautil stats labels.jsonl --by domain
 ```
 
-`classify` requires `--sample N` or `--all`. It sends selected conversations to the configured endpoint and may incur provider charges. `--type subject` assigns a domain; `--type usage` assigns a use category. Pass `--labels` to load custom labels from YAML.
+`classify` requires `--sample N` or `--all`. It uses the OpenAI Python SDK to send selected conversations to the configured Chat Completions endpoint and may incur provider charges. `--type subject` assigns a domain; `--type usage` assigns a use category. Pass `--labels` to load custom labels from YAML.
 
 Classification processes selected records one at a time. Its report retains at most 1,000 failure details; `issue_count` gives the full count and `issues_truncated` indicates whether details were capped.
 
