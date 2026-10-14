@@ -13,7 +13,7 @@ datautil
 ├── format
 │   ├── list
 │   ├── detect INPUT
-│   └── convert INPUT -o OUTPUT --to FORMAT
+│   └── convert INPUT -o OUTPUT [--from FORMAT] [--to FORMAT]
 ├── analyze
 │   ├── inspect INPUT
 │   ├── validate INPUT [--to FORMAT]
@@ -32,12 +32,101 @@ datautil
     └── run PIPELINE.yaml
 ```
 
-Conversation operations accept the built-in OpenAI messages, ShareGPT,
-and Alpaca adapters or YAML profiles. `prepare build` accepts document
-JSONL and Parquet from its recipe. Standalone document conversion,
-inspection, validation, and reviewable document/paragraph dedup remain
-planned, as do `analyze score`, `analyze contamination scan`, and
-`pipeline validate`. Help registers only implemented actions.
+JSON, JSONL, and Parquet are shared storage backends. Record formats are
+OpenAI messages, ShareGPT, Alpaca, document, and YAML mappings. `format
+convert` accepts every storage/record combination and also raw records
+when both `--from` and `--to` are omitted. Existing conversation analysis
+and preparation operations reuse these backends; `prepare build` composes
+document field mappings with them. Standalone document inspection,
+validation, and reviewable document/paragraph dedup remain planned, as do
+`analyze score`, `analyze contamination scan`, and `pipeline validate`.
+Help registers only implemented actions.
+
+### Storage and record composition
+
+`common/storage.py` owns the `StorageBackend` and `RowWriter` protocols.
+Text and Parquet backends read and write raw rows with source locations.
+They have no dependency on a conversation or document model. The old
+`common/io.py` helpers delegate to this registry. `common/textio.py`
+contains the streaming JSON codec.
+
+`application/datasets.py` composes a backend with a record adapter and
+validator. `RecordCodec` holds an adapter and its validator; `DatasetReader`
+and `DatasetWriter` hold a backend and codec separately. The adapters
+provide `parse` and `serialize` through structural protocols and do not
+inherit a shared record-format implementation. `YamlDocumentAdapter`
+composes the same document field mapping used by corpus recipes.
+`application/conversion.py` chooses each side independently. Converting
+only storage preserves raw rows; specifying a record format invokes the
+appropriate parser and validator. Crossing document/conversation models
+requires an explicit semantic mapping, while target-format limitations
+such as Alpaca's tool-call incompatibility still fail explicitly.
+
+```mermaid
+classDiagram
+    class StorageBackend {
+        <<protocol>>
+        +read(path, errors)
+        +writer(path)
+    }
+    class RecordAdapter {
+        <<protocol>>
+        +name
+        +record_kind
+        +parse(raw, location)
+        +serialize(record)
+    }
+    class RecordCodec {
+        +adapter
+        +validate
+    }
+    class DatasetReader {
+        +backend
+        +codec
+        +formats
+        +rows(path, errors)
+        +parse(raw, location)
+    }
+    class DatasetWriter {
+        +backend
+        +codec
+        +open(path)
+    }
+    RecordCodec o-- RecordAdapter
+    DatasetReader o-- StorageBackend
+    DatasetReader o-- RecordCodec
+    DatasetWriter o-- StorageBackend
+    DatasetWriter o-- RecordCodec
+    class TextStorageBackend
+    class ParquetStorageBackend
+    TextStorageBackend ..> StorageBackend : satisfies
+    ParquetStorageBackend ..> StorageBackend : satisfies
+    class DocumentFormatAdapter
+    class YamlDocumentAdapter
+    YamlDocumentAdapter o-- DocumentFormatAdapter
+    DocumentFormatAdapter ..> RecordAdapter : satisfies
+    YamlDocumentAdapter ..> RecordAdapter : satisfies
+```
+
+Parquet writing stages bounded Arrow IPC batches to discover a complete
+schema across records before publishing output. Native columns remain
+available to other tools. A collision-safe helper column stores record
+shape, identified by `datautil.shape_column` and `datautil.shape_version`
+in file metadata. The reader uses it to restore absent keys, explicit
+nulls, empty objects, and scalar kinds. External Parquet files without
+this marker are read as ordinary rows. Each inference and final encoding
+pass checks for value changes; incompatible typed fields fail without
+replacing an existing output. Temporary disk use grows with the staged
+data, and schema memory grows with the field set. JSON export rejects
+native Arrow values that JSON cannot represent instead of stringifying
+them implicitly. Dry runs check the selected backend as well as the codec.
+
+Profiles describe logical records. New profiles omit `container`; legacy
+profiles may retain a storage hint for compatibility. Explicit
+`--input-storage` / `--output-storage` options and `.parquet` extensions
+take precedence over those hints. `--input-container` / `--output-container`
+remain aliases. Corpus recipes use `sources[].storage` and
+`output_storage`; the former `sources[].format` key is a storage alias.
 
 ### Routing and compatibility
 
@@ -101,18 +190,20 @@ those domains into `common`:
 ```text
 src/datautil/
   cli.py, __main__.py       command-line presentation
-  application/              shared parser, CommandSpec/CommandResult, dispatch, pipeline
+  application/              parser, routing, composed dataset I/O, conversion,
+                            CommandSpec/CommandResult, dispatch, pipeline
   conversation/             conversation model, format profiles, validation,
                             analysis, transformation, dedup, classification, sampling
-  pretrain/                 independent document model, JSONL/Parquet sources,
+  pretrain/                 independent document model and field mappings,
                             quality, dedup, recipe validation, corpus runner
-  common/                   DataError/Issue, JSONL and atomic output, disk index
+  common/                   DataError/Issue, shared storage backends and text
+                            codec, atomic output, disk index
 ```
 
 `Conversation` and `DocumentRecord` are separate models with no shared record
 base class. The format registry is scoped to one command execution. YAML profiles
-cannot leak into later CLI or pipeline steps. JSONL and Parquet document sources
-implement the same reading protocol; the pretraining runner chooses one from the
+cannot leak into later CLI or pipeline steps. Document sources compose the same record mapping with shared JSON,
+JSONL, and Parquet backends; the pretraining runner chooses one from the
 recipe and performs quality checks, document dedup, paragraph dedup, post-dedup
 quality recheck, mixing, and writing. Dedup index updates for one candidate
 document commit or roll back together.
@@ -144,9 +235,9 @@ The first interchange format is UTF-8 document JSONL, one complete document per 
 {"id":"source-0001","text":"First paragraph.\n\nSecond paragraph.","metadata":{"source":"web","url":"https://example.org/page"}}
 ```
 
-Preserve embedded newlines in `text`; a physical JSONL line is one document, not one paragraph. `prepare build` reads generic JSONL and Parquet rows and maps their fields with YAML, including C4-style exports. PyArrow is a default dependency. Plain `.txt`, compressed shards, and a standalone document conversion command remain planned. Token IDs, tokenizer version, sequence packing, and training splits belong to a separate training export, since they depend on a particular model recipe. Do not put perplexity or dedup decisions into the source document body; write keyed score and decision artifacts.
+Preserve embedded newlines in `text`; a physical JSONL line is one document, not one paragraph. `prepare build` reads generic JSON, JSONL, and Parquet rows and maps their fields with YAML, including C4-style exports. PyArrow is a default dependency. Plain `.txt` and compressed shards remain planned. The generic `format convert` command now supports standalone document and storage conversion. Token IDs, tokenizer version, sequence packing, and training splits belong to a separate training export, since they depend on a particular model recipe. Do not put perplexity or dedup decisions into the source document body; write keyed score and decision artifacts.
 
-The initial implementation round-trips text and JSON-compatible metadata through document JSONL or Parquet, derives IDs when absent, streams input batches, and stores corpus state in temporary SQLite files. Tests cover mixed JSONL/Parquet sources, metadata mapping, duplicate removal, and deterministic output. Remaining acceptance work includes broader malformed-row coverage, explicit cross-kind conversion diagnostics, and large-corpus disk and memory benchmarks.
+The implementation round-trips document text and metadata through the shared JSON, JSONL, and Parquet backends, derives IDs when absent, streams input batches, and stores corpus state in temporary SQLite files. Tests cover mixed JSONL/Parquet sources, metadata mapping, duplicate removal, and deterministic output. Remaining acceptance work includes broader malformed-row coverage, explicit cross-kind conversion diagnostics, and large-corpus disk and memory benchmarks.
 
 ## Pretraining quality and deduplication (P0)
 
@@ -244,6 +335,8 @@ A separate split of the 100,000-record file with 10,000 two-record groups used 3
 
 
 ### Pretraining document benchmark (synthetic)
+
+These measurements predate the shared storage backend refactor. Re-run the workload before comparing current storage throughput or disk use.
 
 Run `.venv/bin/python benchmarks/pretrain_corpus.py --rows N` on 5090x8 (Python 3.12) to reproduce this workload. The generator writes three roughly 60-word paragraphs per document, makes every twentieth document an exact copy of its predecessor, and reuses a middle paragraph in every tenth newly generated document. The recipe uses document near-dedup at 0.8, paragraph exact dedup at 1.0, `quality.min_chars: 200`, and selects half the input count. These are synthetic measurements, not throughput or duplicate-rate estimates for a real corpus.
 

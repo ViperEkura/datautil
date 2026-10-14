@@ -2,7 +2,7 @@ version: 1
 sources:
   - name: web
     input: web.jsonl
-    format: jsonl
+    storage: jsonl
     weight: 3
     fields:
       id: id
@@ -12,7 +12,7 @@ sources:
         language: language
   - name: books
     input: books.parquet
-    format: parquet
+    storage: parquet
     weight: 1
     fields:
       id: doc_id
@@ -33,5 +33,6 @@ dedup:
     threshold: 1.0
     min_chars: 80
 output: pretrain.jsonl
+output_storage: jsonl
 report: pretrain-report.jsonl
 decisions: pretrain-decisions.jsonl

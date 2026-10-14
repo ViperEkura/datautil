@@ -1,7 +1,6 @@
 # Example for a ClickHouse SELECT ... FORMAT JSONEachRow export.
 version: 1
 name: clickhouse-inference
-container: JSONEachRow
 layout: pair
 fields:
   id: request_id

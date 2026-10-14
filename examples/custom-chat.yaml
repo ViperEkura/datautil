@@ -1,6 +1,5 @@
 version: 1
 name: custom-chat
-container: jsonl
 layout: messages
 fields:
   id: conversation_id

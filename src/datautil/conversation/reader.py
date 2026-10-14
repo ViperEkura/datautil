@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from datautil.common.errors import DataError
-from datautil.common.io import iter_raw
+from datautil.common.io import container_for, iter_raw
 from datautil.conversation.formats import ADAPTERS, detect_record, validate_record
 from datautil.conversation.model import DatasetRecord
 
@@ -28,7 +28,9 @@ def read_records(
     if selected and selected not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {selected!r}")
     if container == "auto" and selected:
-        container = getattr(ADAPTERS[selected], "container", "auto")
+        container = container_for(
+            path, "auto", getattr(ADAPTERS[selected], "storage_hint", None)
+        )
     for location, raw in iter_raw(path, container):
         if location_alias is not None and location.startswith(path):
             location = location_alias + location[len(path) :]

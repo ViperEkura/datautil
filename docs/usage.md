@@ -25,7 +25,7 @@ Use `python -m pip install .` in a new environment. The current distribution nam
 | `prepare` | `clean`, `dedup scan`, `dedup apply`, `sample`, `split`, `build` |
 | `pipeline` | `run` |
 
-Use `datautil GROUP --help` or `datautil GROUP ACTION --help` for parameters. Most actions process conversations; `prepare build` reads document JSONL and Parquet from a recipe. Perplexity scoring, benchmark contamination scanning, and standalone pipeline validation remain planned and are not registered as CLI actions.
+Use `datautil GROUP --help` or `datautil GROUP ACTION --help` for parameters. Most analysis and preparation actions process conversations across JSON, JSONL, and Parquet; `prepare build` processes documents across the same backends. Perplexity scoring, benchmark contamination scanning, and standalone pipeline validation remain planned and are not registered as CLI actions.
 
 The flat spellings remain callable aliases: `formats` maps to `format list`, `detect` and `convert` to `format detect` and `format convert`; `inspect`, `validate`, `analyze`, `stats`, and `classify` map to the corresponding `analyze` actions, with `analyze` becoming `analyze summary` and `stats` becoming `analyze labels`. `clean`, `dedup`, `sample`, and `split` map to `prepare`; `pretrain run` maps to `prepare build`; `run` maps to `pipeline run`. The removed `transform` spelling is not supported. `datautil analyze --help` now lists the group; use `datautil analyze summary --help` for summary parameters.
 
@@ -45,12 +45,46 @@ Validation continues after malformed JSONL rows and detects duplicate record IDs
 
 ## Convert formats
 
+Storage and record structure are separate choices. `--input-storage` and `--output-storage` accept `auto`, `json`, `jsonl`, or `parquet`. Filenames choose the backend by default. `--from` and `--to` select a record mapping such as `sharegpt`, `openai-messages`, `alpaca`, `document`, or a YAML profile. The older `--input-container` and `--output-container` flags remain aliases.
+
+Omit both record-format flags to retain raw records, including unknown schemas:
+
+```bash
+datautil format convert input.jsonl -o output.parquet
+datautil format convert input.parquet -o output.jsonl
+datautil format convert source.data -o target.data --input-storage jsonl --output-storage parquet
+```
+
+Use record-format flags when parsing, validating, or remapping the structure:
+
 ```bash
 datautil format convert sharegpt.jsonl -o /tmp/sharegpt-openai.jsonl --from sharegpt --to openai-messages
 datautil format convert alpaca.jsonl -o /tmp/alpaca-openai.jsonl --from alpaca --to openai-messages
 ```
 
-Built-in formats are `openai-messages`, `sharegpt`, and `alpaca`. Conversion fails by default when the target cannot represent source fields. `.jsonl` and `.ndjson` outputs contain one record per line; `.json` outputs contain a JSON array.
+Built-in record formats are `openai-messages`, `sharegpt`, `alpaca`, and `document`. All can be combined with any of the three storage backends. Omitting `--to` while specifying `--from` retains that record format after validation. Conversion fails when the destination cannot represent source fields; document and conversation records require an explicit semantic mapping to cross their model boundary. `.jsonl` and `.ndjson` select JSONL, `.json` selects a JSON array, and `.parquet` selects Parquet. Binary Parquet input and output also work with `-` and an explicit storage flag.
+
+Parquet output retains native columns and writes a collision-safe shape helper column identified by file metadata. This preserves absent versus null fields, empty objects, and nested optional fields when read by datautil. The writer stages bounded Arrow IPC batches on disk, merges the complete field schema, and checks for value changes before publishing output. Inconsistent typed fields and unrepresentable values fail explicitly. Allow temporary space proportional to the dataset. Native timestamps can remain in Parquet; exporting them to JSON without an explicit value conversion is rejected. `--dry-run` also checks backend representability without replacing the requested output. File output uses atomic replacement.
+
+Document profiles use the same `--format-config` option:
+
+```yaml
+version: 1
+name: web-document
+layout: document
+fields:
+  id: doc_id
+  text: page.body
+  metadata:
+    url: page.url
+```
+
+```bash
+datautil format convert web.jsonl -o documents.parquet \
+  --format-config examples/custom-document.yaml --from web-document --to document
+```
+
+Profiles describe records independently of storage. New profiles omit `container`. Existing profiles containing it retain their legacy text hint; an explicit storage option or a `.parquet` filename takes precedence.
 
 Use `--format-config` for custom record layouts. The ClickHouse example reads an exported `JSONEachRow` file; it does not connect to a database:
 
@@ -68,13 +102,14 @@ datautil format convert clickhouse-inference.jsonl -o /tmp/clickhouse-openai.jso
 
 ## Prepare pretraining documents
 
-`datautil prepare build RECIPE.yaml` processes documents rather than conversations. It reads JSONL and Parquet directly. Install the normal package; `pyarrow` is a default dependency. A JSONL physical line or a Parquet row is one complete document, including any embedded paragraph newlines.
+`datautil prepare build RECIPE.yaml` composes document field mappings with JSON, JSONL, or Parquet storage. A JSONL physical line, JSON array entry, or Parquet row is one complete document, including embedded paragraph newlines.
 
 ```yaml
 version: 1
 sources:
   - name: web
     input: web.jsonl
+    storage: jsonl
     weight: 3
     fields:
       id: doc_id
@@ -83,6 +118,7 @@ sources:
         url: url
   - name: books
     input: books.parquet
+    storage: parquet
     weight: 1
     fields:
       id: book_id
@@ -96,11 +132,12 @@ dedup:
   document: {threshold: 0.8, shingle_size: 5, max_candidates: 10000}
   paragraph: {threshold: 1.0, min_chars: 80}
 output: pretrain.parquet
+output_storage: parquet
 report: pretrain-report.jsonl
 decisions: pretrain-decisions.jsonl
 ```
 
-Paths are relative to the recipe. `fields.text` is required; `fields.id` defaults to `id`. Dotted paths map nested JSON objects, and `fields.metadata` renames selected source fields. Other source columns are preserved in metadata by default; set `fields.preserve_extra: false` to keep only mapped metadata. An absent ID is derived from the source name and row location. IDs must be unique across all sources. Output JSONL uses `id`, `text`, and `metadata`; output Parquet uses `id`, `text`, and a JSON-encoded `metadata_json` column to keep a stable schema.
+Paths are relative to the recipe. `storage` selects each input backend and `output_storage` selects the output backend; both can be inferred from the filename. The old source `format: jsonl|parquet` key remains a storage alias and cannot be combined with `storage`. `fields.text` is required; `fields.id` defaults to `id`. Dotted paths map nested objects, and `fields.metadata` renames selected source fields. Other columns are preserved in metadata by default; set `fields.preserve_extra: false` to keep only mapped metadata. An absent ID is derived from the source name and row location. IDs must be unique across all sources. All outputs use the same logical `id`, `text`, and `metadata` fields. Older Parquet outputs containing `metadata_json` remain readable.
 
 The `mix.count` unit is **documents**. Weights determine target shares after filtering and deduplication. If a source runs out, its unused quota is redistributed; if all sources run out, the report records a shortfall. The seed makes selection and output order repeatable. Source order determines which copy is kept when a duplicate appears in more than one source. The report includes source fingerprints, available and selected counts, and realized shares.
 

@@ -121,7 +121,7 @@ def run_recipe(path: str) -> dict[str, Any]:
         for source_index, source in enumerate(sources):
             stats = source_stats[source_index]
             for record in iter_documents(
-                source.path, source.name, source.fields, source.format
+                source.path, source.name, source.fields, source.storage
             ):
                 stats["read"] += 1
                 try:
@@ -276,7 +276,7 @@ def run_recipe(path: str) -> dict[str, Any]:
                 (source_index, amount),
             )
             source_stats[source_index]["selected"] = amount
-        with document_writer(recipe["output"]) as append:
+        with document_writer(recipe["output"], recipe["output_storage"]) as append:
             for record_id, text, metadata, location in connection.execute(
                 "SELECT id, text, metadata, location FROM records JOIN selected USING(seq) ORDER BY score, seq"
             ):
@@ -285,6 +285,7 @@ def run_recipe(path: str) -> dict[str, Any]:
         report = {
             "config_sha256": recipe["config_sha256"],
             "output": recipe["output"],
+            "output_storage": recipe["output_storage"],
             "requested_count": recipe["count"],
             "written_count": count,
             "shortfall": recipe["count"] - count,

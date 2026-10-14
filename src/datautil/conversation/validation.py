@@ -6,7 +6,7 @@ from typing import Any
 
 from datautil.common.errors import DataError, Issue
 from datautil.common.index import DiskIndex
-from datautil.common.io import iter_raw, output_writer
+from datautil.common.io import container_for, iter_raw
 from datautil.conversation.formats import ADAPTERS, detect_record, validate_record
 
 
@@ -39,11 +39,7 @@ def detect(path: str, container: str = "auto", sample: int = 100) -> dict[str, A
         else None
     )
     return {
-        "container": container
-        if container != "auto"
-        else (
-            "jsonl" if path == "-" or path.endswith((".jsonl", ".ndjson")) else "json"
-        ),
+        "container": container_for(path, container),
         "sampled": seen,
         "selected": selected,
         "candidates": ranked,
@@ -57,8 +53,10 @@ def inspect(
         raise DataError("invalid_argument", "sample must be positive")
     if format_name and format_name not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {format_name!r}")
-    container = (
-        getattr(ADAPTERS[format_name], "container", "auto") if format_name else "auto"
+    container = container_for(
+        path,
+        "auto",
+        getattr(ADAPTERS[format_name], "storage_hint", None) if format_name else None,
     )
     fields: Counter[str] = Counter()
     roles: Counter[str] = Counter()
@@ -106,7 +104,11 @@ def validate(
         raise DataError("unknown_format", f"Unknown format {source!r}")
     if target and target not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {target!r}")
-    container = getattr(ADAPTERS[source], "container", "auto") if source else "auto"
+    container = container_for(
+        path,
+        "auto",
+        getattr(ADAPTERS[source], "storage_hint", None) if source else None,
+    )
     count = 0
     issue_count = 0
     issues: list[dict[str, Any]] = []
@@ -151,68 +153,3 @@ def validate(
         "issues": issues,
         "issues_truncated": issue_count > len(issues),
     }
-
-
-def convert(
-    path: str,
-    output: str,
-    source: str | None,
-    target: str,
-    *,
-    on_error: str = "fail",
-    dry_run: bool = False,
-    input_container: str = "auto",
-    output_container: str = "auto",
-) -> dict[str, Any]:
-    if source and source not in ADAPTERS:
-        raise DataError("unknown_format", f"Unknown format {source!r}")
-    if target not in ADAPTERS:
-        raise DataError("unknown_format", f"Unknown format {target!r}")
-    if input_container == "auto" and source:
-        input_container = getattr(ADAPTERS[source], "container", "auto")
-    if output_container == "auto":
-        output_container = getattr(ADAPTERS[target], "container", "auto")
-    report: dict[str, Any] = {
-        "read_count": 0,
-        "written_count": 0,
-        "skipped_count": 0,
-        "issues": [],
-    }
-
-    def process(writer: Any = None) -> None:
-        for location, raw in iter_raw(
-            path, input_container, errors="yield" if on_error == "skip" else "raise"
-        ):
-            report["read_count"] += 1
-            try:
-                if isinstance(raw, DataError):
-                    raise raw
-                selected = source or detect_record(raw)
-                if isinstance(selected, list):
-                    if len(selected) != 1:
-                        raise DataError(
-                            "ambiguous_format", f"Matches {selected}", location
-                        )
-                    selected = selected[0]
-                record = ADAPTERS[selected].parse(raw, location)
-                validate_record(record)
-                encoded = ADAPTERS[target].serialize(record)
-                if writer is not None:
-                    writer.write(encoded)
-                report["written_count"] += 1
-            except DataError as exc:
-                report["skipped_count"] += 1
-                if len(report["issues"]) < 1000:
-                    report["issues"].append(
-                        Issue(exc.code, str(exc), exc.location or location).as_dict()
-                    )
-                if on_error == "fail":
-                    raise
-
-    if dry_run:
-        process()
-    else:
-        with output_writer(output, output_container) as writer:
-            process(writer)
-    report["issues_truncated"] = report["skipped_count"] > len(report["issues"])
-    return report

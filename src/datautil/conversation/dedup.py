@@ -13,7 +13,7 @@ from typing import Any, Iterable
 
 from datautil.common.errors import DataError
 from datautil.common.index import DiskIndex
-from datautil.common.io import iter_raw, output_writer
+from datautil.common.io import container_for, iter_raw, output_writer
 from datautil.conversation.formats import ADAPTERS
 from datautil.conversation.model import DatasetRecord
 from datautil.conversation.reader import read_records, replayable_input, source_format
@@ -286,7 +286,10 @@ def dedup_apply_file(
                             )
             written = 0
             with output_writer(
-                output, getattr(ADAPTERS[source], "container", "auto")
+                output,
+                container_for(
+                    output, "auto", getattr(ADAPTERS[source], "storage_hint", None)
+                ),
             ) as writer:
                 position = 0
                 for position, record in enumerate(

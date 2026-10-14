@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from abc import ABC, abstractmethod
 from collections.abc import Mapping as MappingABC
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Protocol
 
 from datautil.common.errors import DataError
 from datautil.conversation.model import Conversation, DatasetRecord, Message, ToolCall
@@ -21,22 +20,25 @@ def _id(raw: dict[str, Any], location: str) -> str:
     return f"{digest}-{hashlib.sha256(location.encode()).hexdigest()[:8]}"
 
 
-class FormatAdapter(ABC):
+class FormatAdapter(Protocol):
     name: str
+    record_kind: str
+    label_heading: str
+
+    def display_label(self, role: str) -> str: ...
+
+    def parse(self, raw: Any, location: str) -> DatasetRecord: ...
+
+    def serialize(self, record: DatasetRecord) -> dict[str, Any]: ...
+
+
+class OpenAIMessagesAdapter:
+    name = "openai-messages"
+    record_kind = "conversation"
     label_heading = "Message roles"
 
     def display_label(self, role: str) -> str:
         return role
-
-    @abstractmethod
-    def parse(self, raw: Any, location: str) -> DatasetRecord: ...
-
-    @abstractmethod
-    def serialize(self, record: DatasetRecord) -> dict[str, Any]: ...
-
-
-class OpenAIMessagesAdapter(FormatAdapter):
-    name = "openai-messages"
 
     def parse(self, raw: Any, location: str) -> DatasetRecord:
         if not isinstance(raw, dict) or not isinstance(raw.get("messages"), list):
@@ -83,7 +85,7 @@ class OpenAIMessagesAdapter(FormatAdapter):
                     location,
                 )
             calls = []
-            for call in item.get("tool_calls", []):
+            for call in item.get("tool_calls") or []:
                 if not isinstance(call, dict) or not isinstance(
                     call.get("function"), dict
                 ):
@@ -149,8 +151,9 @@ class OpenAIMessagesAdapter(FormatAdapter):
         return {"id": record.record_id, "messages": messages, **record.metadata}
 
 
-class ShareGPTAdapter(FormatAdapter):
+class ShareGPTAdapter:
     name = "sharegpt"
+    record_kind = "conversation"
     label_heading = "Source roles"
     roles = {"human": "user", "gpt": "assistant", "system": "system"}
     inverse = {value: key for key, value in roles.items()}
@@ -211,8 +214,9 @@ class ShareGPTAdapter(FormatAdapter):
         }
 
 
-class AlpacaAdapter(FormatAdapter):
+class AlpacaAdapter:
     name = "alpaca"
+    record_kind = "conversation"
     label_heading = "Mapped fields"
 
     def display_label(self, role: str) -> str:

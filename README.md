@@ -16,31 +16,60 @@ See the [usage guide](docs/usage.md) for command examples, the [design document]
 
 ## Commands
 
-The CLI has four groups: `format` for adapters and conversion, `analyze` for inspection and labeling, `prepare` for dataset processing, and `pipeline` for YAML workflows. Run `datautil GROUP --help` to list its actions. Conversation operations currently support OpenAI messages, ShareGPT, Alpaca, and custom YAML profiles; `prepare build` handles document JSONL and Parquet.
+```text
+datautil
+├── format
+│   ├── list
+│   ├── detect INPUT
+│   └── convert INPUT -o OUTPUT [--from FORMAT] [--to FORMAT]
+├── analyze
+│   ├── inspect INPUT
+│   ├── validate INPUT [--from FORMAT] [--to FORMAT]
+│   ├── summary INPUT [--json] [-o RECORDS.jsonl]
+│   ├── labels LABELS.jsonl [--by domain|usage_topic]
+│   └── classify INPUT (--sample N | --all) -o LABELS.jsonl
+├── prepare
+│   ├── clean INPUT -o OUTPUT --from FORMAT --rules RULES.yaml
+│   ├── dedup
+│   │   ├── scan INPUT -o GROUPS.jsonl [--scope conversation|user]
+│   │   └── apply INPUT --groups GROUPS.jsonl -o OUTPUT --keep first
+│   ├── sample INPUT -o OUTPUT --count N [--seed 42]
+│   ├── split INPUT --train TRAIN --test TEST [--groups GROUPS.jsonl]
+│   └── build RECIPE.yaml
+└── pipeline
+    └── run PIPELINE.yaml
+```
+
+Run `datautil GROUP --help` or `datautil GROUP ACTION --help` for options.
+JSON, JSONL, and Parquet are storage backends; OpenAI messages, ShareGPT,
+Alpaca, and document are record formats. YAML profiles map custom record
+layouts. Select storage with `--input-storage` / `--output-storage`, or
+let filenames choose it. Select record structure independently with
+`--from` / `--to`.
 
 ```bash
-datautil format list
-datautil format detect conversations.jsonl
-datautil analyze inspect conversations.jsonl --sample 1000
-datautil analyze summary conversations.jsonl
-datautil analyze summary conversations.jsonl -o analysis.jsonl --report analysis-summary.jsonl
-datautil analyze validate conversations.jsonl --from sharegpt --to openai-messages
-datautil format convert conversations.jsonl -o training.jsonl --from sharegpt --to openai-messages
-datautil prepare clean training.jsonl -o cleaned.jsonl --from openai-messages --rules examples/clean-rules.yaml
-datautil prepare dedup scan training.jsonl -o groups.jsonl --threshold 0.8
-datautil prepare dedup scan training.jsonl -o prompt-groups.jsonl --scope user
-datautil prepare dedup apply training.jsonl --groups groups.jsonl -o unique.jsonl --keep first
-datautil analyze classify unique.jsonl --sample 1000 -o labels.jsonl --model YOUR_MODEL
-datautil analyze classify unique.jsonl --sample 1000 -o usage-labels.jsonl --model YOUR_MODEL --type usage
-datautil analyze labels labels.jsonl
-datautil analyze labels usage-labels.jsonl
-datautil prepare sample unique.jsonl -o sample.jsonl --count 100 --seed 42
-datautil prepare split unique.jsonl --train train.jsonl --test test.jsonl --groups groups.jsonl --seed 42
-datautil pipeline run pipeline.yaml
+# Change storage while retaining the original fields.
+datautil format convert input.jsonl -o output.parquet
+
+# Change both storage and conversation structure.
+datautil format convert input.parquet -o output.jsonl --from sharegpt --to openai-messages
+
+# Map document fields while changing storage.
+datautil format convert web.jsonl -o documents.parquet \
+  --from web-document --to document --format-config examples/custom-document.yaml
+
+# Run a document cleaning, deduplication, and mixing recipe.
 datautil prepare build examples/pretrain.yaml
 ```
 
-`prepare build` reads document JSONL or Parquet, maps text and metadata fields with YAML, applies optional quality checks and document/paragraph deduplication, then selects a deterministic document-count mix. Edit the input paths and output paths in [`examples/pretrain.yaml`](examples/pretrain.yaml) before running it. The report gives available and selected counts per source and flags any shortfall. Document output can be `.jsonl` or `.parquet`; the latter stores metadata as JSON in a `metadata_json` column. Temporary SQLite indexes need disk space. See the [usage guide](docs/usage.md) for configuration details.
+Omitting both `--from` and `--to` performs raw storage conversion.
+A selected record adapter parses and validates records before export;
+incompatible record structures fail explicitly. Most analysis and
+preparation actions currently operate on conversations across all three
+backends. `prepare build` handles documents, using YAML field mappings,
+quality checks, document/paragraph deduplication, and document-count mixing.
+Edit example paths before running them. See the [usage guide](docs/usage.md)
+for recipes and backend details.
 
 Classification uses the OpenAI Python SDK to call an external OpenAI-compatible `/chat/completions` endpoint. `--model` is the model ID served by that endpoint (for example, the name supplied by your provider), not a model bundled with `datautil`. Set `DATAUTIL_API_KEY`; set `DATAUTIL_MODEL` to omit `--model` on each run. `DATAUTIL_API_BASE_URL` selects a compatible endpoint. Only `analyze classify` makes model calls and incurs provider costs. The command requires `--sample N` or `--all`. By default, `--type subject` assigns exactly one primary subject label per conversation:
 
@@ -132,7 +161,6 @@ ClickHouse's `JSONEachRow` describes the **file container** (one JSON object per
 ```yaml
 version: 1
 name: clickhouse-inference
-container: JSONEachRow
 layout: pair
 fields:
   id: request_id
@@ -144,7 +172,7 @@ fields:
 For a ClickHouse export saved as `inference.json` despite containing one object per line:
 
 ```bash
-datautil format convert inference.json -o conversations.jsonl \
+datautil format convert inference.json -o conversations.jsonl --input-storage jsonl \
   --format-config examples/clickhouse-inference.yaml \
   --from clickhouse-inference --to openai-messages
 ```

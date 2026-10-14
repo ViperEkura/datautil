@@ -7,6 +7,7 @@ from typing import Dict, Optional, Sequence
 
 from datautil import __version__
 from datautil.application.routing import COMMAND_PATHS, normalize_argv
+from datautil.common.storage import STORAGE_BACKENDS
 
 
 def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
@@ -33,7 +34,11 @@ def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
     detection.add_argument("input")
     detection.add_argument("--sample", type=int, default=100)
     detection.add_argument(
-        "--input-container", choices=["auto", "json", "jsonl"], default="auto"
+        "--input-storage",
+        "--input-container",
+        dest="input_container",
+        choices=["auto", *STORAGE_BACKENDS],
+        default="auto",
     )
     profile_option(detection)
 
@@ -73,16 +78,28 @@ def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
     validation.add_argument("--report")
     profile_option(validation)
 
-    conversion = command("convert", "Convert conversation records")
+    conversion = command("convert", "Convert storage and optional record structure")
     conversion.add_argument("input")
     conversion.add_argument("-o", "--output", required=True)
     conversion.add_argument("--from", dest="source_format")
-    conversion.add_argument("--to", dest="target_format", required=True)
     conversion.add_argument(
-        "--input-container", choices=["auto", "json", "jsonl"], default="auto"
+        "--to",
+        dest="target_format",
+        help="Target record format; omit both --from and --to for storage-only conversion",
     )
     conversion.add_argument(
-        "--output-container", choices=["auto", "json", "jsonl"], default="auto"
+        "--input-storage",
+        "--input-container",
+        dest="input_container",
+        choices=["auto", *STORAGE_BACKENDS],
+        default="auto",
+    )
+    conversion.add_argument(
+        "--output-storage",
+        "--output-container",
+        dest="output_container",
+        choices=["auto", *STORAGE_BACKENDS],
+        default="auto",
     )
     conversion.add_argument("--on-error", choices=["fail", "skip"], default="fail")
     conversion.add_argument("--dry-run", action="store_true")

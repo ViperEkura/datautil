@@ -10,7 +10,7 @@ import yaml
 
 from datautil.common.errors import DataError
 from datautil.common.index import DiskIndex
-from datautil.common.io import iter_raw, output_writer
+from datautil.common.io import container_for, iter_raw, output_writer
 from datautil.conversation.formats import ADAPTERS, validate_record
 from datautil.conversation.model import Conversation, DatasetRecord
 
@@ -189,8 +189,12 @@ def transform_dataset(
     if source_format not in ADAPTERS:
         raise DataError("unknown_format", f"Unknown format {source_format!r}")
     adapter = ADAPTERS[source_format]
-    input_container = getattr(adapter, "container", "auto")
-    output_container = getattr(adapter, "container", "auto")
+    input_container = container_for(
+        input_path, "auto", getattr(adapter, "storage_hint", None)
+    )
+    output_container = container_for(
+        output_path, "auto", getattr(adapter, "storage_hint", None)
+    )
     read_count = written_count = 0
     dropped: Counter[int] = Counter()
     with (

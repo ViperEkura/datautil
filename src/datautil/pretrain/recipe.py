@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from datautil.common.errors import DataError
+from datautil.common.storage import storage_for
 from datautil.pretrain.quality import validate_document_quality
 from datautil.pretrain.sources import validate_fields
 
@@ -18,9 +19,13 @@ from datautil.pretrain.sources import validate_fields
 class Source:
     name: str
     path: str
-    format: str
+    storage: str
     fields: dict[str, Any]
     weight: float
+
+    @property
+    def format(self) -> str:
+        return self.storage
 
 
 def _path(base: Path, value: Any, label: str) -> str:
@@ -95,6 +100,7 @@ def load_recipe(path: str) -> dict[str, Any]:
             "dedup",
             "quality",
             "output",
+            "output_storage",
             "report",
             "decisions",
         }
@@ -118,6 +124,7 @@ def load_recipe(path: str) -> dict[str, Any]:
             "name",
             "input",
             "format",
+            "storage",
             "fields",
             "weight",
         }:
@@ -137,15 +144,15 @@ def load_recipe(path: str) -> dict[str, Any]:
             )
         names.add(name)
         source_path = _path(base, item.get("input"), "source input")
-        source_format = item.get("format") or (
-            "parquet" if source_path.lower().endswith(".parquet") else "jsonl"
-        )
-        if source_format not in {"jsonl", "parquet"}:
+        if "format" in item and "storage" in item:
             raise DataError(
                 "invalid_pretrain_config",
-                "source format must be jsonl or parquet",
+                "Use storage or the legacy format key, not both",
                 location,
             )
+        source_format = storage_for(
+            source_path, item.get("storage", item.get("format", "auto"))
+        )
         fields = validate_fields(
             item.get("fields", {"id": "id", "text": "text"}), location
         )
@@ -193,10 +200,7 @@ def load_recipe(path: str) -> dict[str, Any]:
         raise DataError(
             "invalid_pretrain_config", "Input and output paths must differ", path
         )
-    if not output.lower().endswith((".jsonl", ".parquet")):
-        raise DataError(
-            "invalid_pretrain_config", "output must end in .jsonl or .parquet", path
-        )
+    output_storage = storage_for(output, raw.get("output_storage", "auto"))
     return {
         "sources": sources,
         "count": mix["count"],
@@ -205,6 +209,7 @@ def load_recipe(path: str) -> dict[str, Any]:
         "paragraph_dedup": paragraph_dedup,
         "quality": quality,
         "output": output,
+        "output_storage": output_storage,
         "report": report,
         "decisions": decisions,
         "config_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),

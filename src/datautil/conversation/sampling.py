@@ -9,7 +9,7 @@ from typing import Any
 
 from datautil.common.errors import DataError
 from datautil.common.index import DiskIndex
-from datautil.common.io import iter_raw, output_writer
+from datautil.common.io import container_for, iter_raw, output_writer
 from datautil.conversation.formats import ADAPTERS
 from datautil.conversation.model import DatasetRecord
 from datautil.conversation.reader import read_records, replayable_input, source_format
@@ -169,7 +169,10 @@ def sample_file(
         )
         seen = 0
         with output_writer(
-            output, getattr(ADAPTERS[source], "container", "auto")
+            output,
+            container_for(
+                output, "auto", getattr(ADAPTERS[source], "storage_hint", None)
+            ),
         ) as writer:
             for seen, record in enumerate(
                 read_records(
@@ -243,9 +246,13 @@ def split_file(
                     selected_count += size
             train_count = test_count = 0
             with ExitStack() as stack:
-                container = getattr(ADAPTERS[source], "container", "auto")
-                train = stack.enter_context(output_writer(train_path, container))
-                test = stack.enter_context(output_writer(test_path, container))
+                hint = getattr(ADAPTERS[source], "storage_hint", None)
+                train = stack.enter_context(
+                    output_writer(train_path, container_for(train_path, "auto", hint))
+                )
+                test = stack.enter_context(
+                    output_writer(test_path, container_for(test_path, "auto", hint))
+                )
                 for position, record in enumerate(
                     read_records(
                         replay, source, check_duplicate_ids=False, location_alias=path

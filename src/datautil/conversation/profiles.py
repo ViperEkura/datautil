@@ -14,7 +14,7 @@ from typing import Any
 import yaml
 
 from datautil.common.errors import DataError
-from datautil.conversation.formats import FormatAdapter, _id
+from datautil.conversation.formats import _id
 from datautil.conversation.model import Conversation, DatasetRecord, Message, ToolCall
 
 _NAME = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -74,7 +74,9 @@ def _remove(value: dict[str, Any], path: str) -> None:
         del parent[key]
 
 
-class YamlFormatAdapter(FormatAdapter):
+class YamlFormatAdapter:
+    record_kind = "conversation"
+
     @property
     def label_heading(self) -> str:
         return "Source roles" if self.layout == "messages" else "Mapped fields"
@@ -124,6 +126,7 @@ class YamlFormatAdapter(FormatAdapter):
                 "invalid_profile", "container must be json, jsonl, or JSONEachRow", path
             )
         self.container = container
+        self.storage_hint = container if "container" in config else None
         self.fields = config.get("fields")
         if not isinstance(self.fields, dict):
             raise DataError("invalid_profile", "fields must be a mapping", path)

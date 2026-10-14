@@ -1,0 +1,9 @@
+version: 1
+name: web-document
+layout: document
+fields:
+  id: doc_id
+  text: page.body
+  metadata:
+    url: page.url
+    language: language

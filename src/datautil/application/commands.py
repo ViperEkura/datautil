@@ -10,15 +10,17 @@ from collections import Counter
 from typing import Any, Callable
 
 from datautil import __version__
+from datautil.application.conversion import convert, detect
+from datautil.application.datasets import RecordFormats, load_dataset_profiles
 from datautil.application.results import CommandResult, CommandSpec
 from datautil.common.errors import DataError, Issue
 from datautil.common.index import DiskIndex
-from datautil.common.io import iter_raw, output_writer
+from datautil.common.io import container_for, iter_raw, output_writer
+from datautil.common.storage import STORAGE_BACKENDS
 from datautil.conversation.analysis import analyze_dataset
 from datautil.conversation.classification import OpenAICompatibleClassifier, load_labels
 from datautil.conversation.dedup import dedup_apply_file, dedup_scan
-from datautil.conversation.formats import ADAPTERS, use_profiles
-from datautil.conversation.profiles import load_profiles
+from datautil.conversation.formats import use_profiles
 from datautil.conversation.reader import read_records, replayable_input, source_format
 from datautil.conversation.sampling import sample_file, split_file
 from datautil.conversation.transform import (
@@ -26,7 +28,7 @@ from datautil.conversation.transform import (
     transform_dataset,
     validate_rules,
 )
-from datautil.conversation.validation import convert, detect, inspect, validate
+from datautil.conversation.validation import inspect, validate
 from datautil.pretrain.runner import run_recipe
 from datautil.terminal import render_analysis
 
@@ -81,7 +83,10 @@ def _execute(
     args: argparse.Namespace,
     outcome: CommandResult,
     on_step: Callable[[CommandResult], None] | None = None,
+    profiles: Any = None,
 ) -> int:
+    formats = RecordFormats(profiles or [])
+
     def _report(
         args: argparse.Namespace, summary: dict[str, Any], *, to_stdout: bool = False
     ) -> None:
@@ -97,16 +102,18 @@ def _execute(
 
     if args.command == "formats":
         outcome.summary = {
+            "storage_backends": list(STORAGE_BACKENDS),
             "formats": [
                 {
                     "name": name,
                     "read": True,
                     "write": True,
-                    "container": getattr(adapter, "container", "json/jsonl"),
-                    "layout": getattr(adapter, "layout", "built-in"),
+                    "container": "/".join(STORAGE_BACKENDS),
+                    "record_kind": codec.record_kind,
+                    "layout": getattr(codec.adapter, "layout", "built-in"),
                 }
-                for name, adapter in ADAPTERS.items()
-            ]
+                for name, codec in formats.codecs.items()
+            ],
         }
         outcome.messages.append(
             ("stdout", json.dumps(outcome.summary, ensure_ascii=False))
@@ -115,8 +122,10 @@ def _execute(
     if args.command == "detect":
         container = args.input_container
         if container == "auto" and len(args.format_config) == 1:
-            container = ADAPTERS[load_profiles(args.format_config)[0].name].container
-        result = detect(args.input, container, args.sample)
+            container = container_for(
+                args.input, "auto", getattr(profiles[0], "storage_hint", None)
+            )
+        result = detect(args.input, formats, container, args.sample)
         outcome.messages.append(("stdout", json.dumps(result, ensure_ascii=False)))
         outcome.summary = result
         return 0 if result["selected"] else 1
@@ -142,6 +151,7 @@ def _execute(
             args.output,
             args.source_format,
             args.target_format,
+            formats=formats,
             on_error=args.on_error,
             dry_run=args.dry_run,
             input_container=args.input_container,
@@ -402,9 +412,11 @@ def execute(
     args = argparse.Namespace(**dict(spec.options))
     args.command = spec.name
     outcome = CommandResult(0, {}, {}, {})
-    profiles = load_profiles(getattr(args, "format_config", []))
-    with use_profiles(profiles):
-        outcome.exit_code = _execute(args, outcome, on_step)
+    profiles = load_dataset_profiles(getattr(args, "format_config", []))
+    with use_profiles(
+        [profile for profile in profiles if profile.record_kind == "conversation"]
+    ):
+        outcome.exit_code = _execute(args, outcome, on_step, profiles)
     for key in ("output", "train", "test"):
         value = getattr(args, key, None)
         if value and not (args.command == "analyze" and key == "output"):
