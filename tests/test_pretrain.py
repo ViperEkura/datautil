@@ -12,12 +12,26 @@ from support import DatautilTestCase, write_jsonl
 from datautil.cli import main
 from datautil.common.io import iter_raw
 from datautil.pretrain.dedup import DocumentDedupIndex
+from datautil.pretrain.manifest_index import NearIndex, open_db
 from datautil.pretrain.model import DocumentRecord
 from datautil.pretrain.quality import document_quality_issues
 from datautil.pretrain.sources import iter_documents
 
 
 class PretrainTests(DatautilTestCase):
+    def test_compact_near_index_finds_all_three_bit_changes(self):
+        conn = open_db(self.root / "near-index.sqlite", {"schema": "test"})
+        index = NearIndex(conn, "math", 1)
+        signature = 0x123456789ABCDEF0
+        index.add(signature, 2, 17)
+        for changed_bits in ((0, 1, 2), (0, 20, 40), (10, 25, 53), (30, 31, 63)):
+            changed = signature
+            for bit in changed_bits:
+                changed ^= 1 << bit
+            self.assertEqual(index.find(changed, 2000, 3, 0), (2, 17, 3))
+        self.assertIsNone(index.find(signature ^ 0b1111, 2000, 3, 0))
+        conn.close()
+
     def test_compact_manifest_index_prefers_l2_math_over_l1_math(self):
         shared = "A mathematical derivation with enough explanatory words to exceed the minimum text length."
         files = []

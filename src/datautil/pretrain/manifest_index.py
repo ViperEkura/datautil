@@ -11,7 +11,9 @@ import json
 import re
 import sqlite3
 import struct
+from array import array
 from collections import Counter
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +47,9 @@ FALLBACK_FIELDS = (
 WORD = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 SCHEMA_VERSION = "2"
+BLOCK_WIDTHS = (13, 13, 13, 13, 12)
+BLOCK_SHIFTS = (0, 13, 26, 39, 52)
+BLOCK_PAIRS = tuple(combinations(range(5), 2))
 
 
 def extract(row):
@@ -179,38 +184,89 @@ def open_db(path, identity):
     return conn
 
 
-def check_or_add(conn, text, group, file_id, row_num, category, candidate_cap):
+def pair_keys(signature):
+    blocks = tuple(
+        (signature >> shift) & ((1 << width) - 1)
+        for shift, width in zip(BLOCK_SHIFTS, BLOCK_WIDTHS)
+    )
+    return tuple(
+        blocks[left] | (blocks[right] << BLOCK_WIDTHS[left])
+        for left, right in BLOCK_PAIRS
+    )
+
+
+class NearIndex:
+    """Five SimHash blocks; distance <=3 guarantees one exact block pair."""
+
+    def __init__(self, conn, group, expected_rows):
+        self.group = group
+        self.dense = expected_rows >= 5_000_000
+        self.heads = [
+            np.full(1 << (BLOCK_WIDTHS[left] + BLOCK_WIDTHS[right]), -1, dtype=np.int32)
+            if self.dense
+            else {}
+            for left, right in BLOCK_PAIRS
+        ]
+        self.links = [array("i") for _ in BLOCK_PAIRS]
+        self.signatures = array("Q")
+        self.file_ids = array("I")
+        self.row_nums = array("I")
+        for raw_sig, file_id, row_num in conn.execute(
+            "SELECT sig, file_id, row_num FROM near_seen NOT INDEXED "
+            "WHERE grp=? ORDER BY rowid", (group,)
+        ):
+            self.add(int.from_bytes(raw_sig, "little"), file_id, row_num)
+
+    def _head(self, pair, key):
+        heads = self.heads[pair]
+        return int(heads[key]) if self.dense else heads.get(key, -1)
+
+    def add(self, signature, file_id, row_num):
+        index = len(self.signatures)
+        for pair, key in enumerate(pair_keys(signature)):
+            self.links[pair].append(self._head(pair, key))
+            self.heads[pair][key] = index
+        self.signatures.append(signature)
+        self.file_ids.append(file_id)
+        self.row_nums.append(row_num)
+
+    def find(self, signature, candidate_cap, file_id, row_num):
+        seen = set()
+        for pair, key in enumerate(pair_keys(signature)):
+            index = self._head(pair, key)
+            while index != -1:
+                if index not in seen:
+                    seen.add(index)
+                    if len(seen) > candidate_cap:
+                        raise RuntimeError(
+                            f"Near-match candidate cap {candidate_cap} reached at file {file_id}, row {row_num}"
+                        )
+                    distance = (signature ^ self.signatures[index]).bit_count()
+                    if distance <= 3:
+                        return self.file_ids[index], self.row_nums[index], distance
+                index = self.links[pair][index]
+        return None
+
+
+def check_or_add(conn, text, near_index, file_id, row_num, category, candidate_cap):
     digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
     if conn.execute("SELECT 1 FROM exact_seen WHERE digest=?", (digest,)).fetchone():
         return "exact"
-    signature = simhash(text) if group else None
+    signature = simhash(text) if near_index is not None else None
     if signature is not None:
         bands = tuple((signature >> (16 * band)) & 65535 for band in range(4))
-        seen_ids = set()
-        for band, value in enumerate(bands):
-            query = f"SELECT rowid, sig, file_id, row_num FROM near_seen WHERE grp=? AND b{band}=?"
-            for seen_id, old_sig, kept_file, kept_row in conn.execute(
-                query, (group, value)
-            ):
-                if seen_id in seen_ids:
-                    continue
-                seen_ids.add(seen_id)
-                if len(seen_ids) > candidate_cap:
-                    raise RuntimeError(
-                        f"Near-match candidate cap {candidate_cap} reached at file {file_id}, row {row_num}"
-                    )
-                distance = (signature ^ int.from_bytes(old_sig, "little")).bit_count()
-                if distance <= 3:
-                    count = conn.execute(
-                        "SELECT COUNT(*) FROM near_examples WHERE category=?",
-                        (category,),
-                    ).fetchone()[0]
-                    if count < 100:
-                        conn.execute(
-                            "INSERT INTO near_examples VALUES (?, ?, ?, ?, ?, ?)",
-                            (category, file_id, row_num, kept_file, kept_row, distance),
-                        )
-                    return "near"
+        match = near_index.find(signature, candidate_cap, file_id, row_num)
+        if match is not None:
+            kept_file, kept_row, distance = match
+            count = conn.execute(
+                "SELECT COUNT(*) FROM near_examples WHERE category=?", (category,)
+            ).fetchone()[0]
+            if count < 100:
+                conn.execute(
+                    "INSERT INTO near_examples VALUES (?, ?, ?, ?, ?, ?)",
+                    (category, file_id, row_num, kept_file, kept_row, distance),
+                )
+            return "near"
     conn.execute(
         "INSERT INTO exact_seen VALUES (?, ?, ?)",
         (digest, file_id, row_num),
@@ -218,8 +274,9 @@ def check_or_add(conn, text, group, file_id, row_num, category, candidate_cap):
     if signature is not None:
         conn.execute(
             "INSERT INTO near_seen VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (group, signature.to_bytes(8, "little"), file_id, row_num, *bands),
+            (near_index.group, signature.to_bytes(8, "little"), file_id, row_num, *bands),
         )
+        near_index.add(signature, file_id, row_num)
     return "kept"
 
 
@@ -316,6 +373,11 @@ def run(args):
             raise RuntimeError(f"Source escapes manifest directory: {source}")
         if not source.is_file() or source.stat().st_size != item["bytes"]:
             raise RuntimeError(f"Missing or size mismatch: {source}")
+    group_rows = Counter()
+    for item in files:
+        group = near_group(item["category"])
+        if group is not None:
+            group_rows[group] += pq.ParquetFile(raw_root / item["output_file"]).metadata.num_rows
     if not (args.output / "dedup.sqlite").exists() and any(
         path.exists()
         for path in (args.output / "keep", args.output / "status.json", args.output / "manifest.json")
@@ -330,6 +392,8 @@ def run(args):
     }
     conn = open_db(args.output / "dedup.sqlite", identity)
     processed_now = 0
+    active_group = None
+    near_index = None
     try:
         for position, (file_id, item) in enumerate(processing_order(files)):
             if args.max_files and position >= args.max_files:
@@ -345,6 +409,10 @@ def run(args):
             if len(completed) == parquet.num_row_groups:
                 export_keep_index(conn, args.output, file_id, parquet.metadata.num_rows)
                 continue
+            group = near_group(item["category"])
+            if group != active_group:
+                near_index = NearIndex(conn, group, group_rows[group]) if group else None
+                active_group = group
             columns = [
                 name
                 for name in parquet.schema_arrow.names
@@ -381,7 +449,7 @@ def run(args):
                                 result = check_or_add(
                                     conn,
                                     text,
-                                    near_group(item["category"]),
+                                    near_index,
                                     file_id,
                                     row_num,
                                     item["category"],
