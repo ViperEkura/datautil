@@ -13,7 +13,9 @@ import sqlite3
 import struct
 from array import array
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -248,11 +250,36 @@ class NearIndex:
         return None
 
 
-def check_or_add(conn, text, near_index, file_id, row_num, category, candidate_cap):
-    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+def prepare_group(task):
+    source, category, row_group, offset, columns, use_threads = task
+    parquet = pq.ParquetFile(source)
+    is_code = category.startswith("code")
+    needs_near = near_group(category) is not None
+    minimum = 30 if is_code else 50
+    fingerprints = []
+    count = filtered = 0
+    for batch in parquet.iter_batches(
+        row_groups=[row_group], batch_size=256, columns=columns,
+        use_threads=use_threads,
+    ):
+        for row in batch.to_pylist():
+            row_num = offset + count
+            count += 1
+            text = normalize(extract(row), is_code)
+            if len(text) < minimum or CTRL.search(text) or "\ufffd" in text:
+                filtered += 1
+                continue
+            digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+            signature = simhash(text) if needs_near else None
+            fingerprints.append((row_num, digest, signature))
+    return row_group, count, filtered, fingerprints
+
+
+def check_or_add_fingerprint(
+    conn, digest, signature, near_index, file_id, row_num, category, candidate_cap
+):
     if conn.execute("SELECT 1 FROM exact_seen WHERE digest=?", (digest,)).fetchone():
         return "exact"
-    signature = simhash(text) if near_index is not None else None
     if signature is not None:
         bands = tuple((signature >> (16 * band)) & 65535 for band in range(4))
         match = near_index.find(signature, candidate_cap, file_id, row_num)
@@ -278,6 +305,15 @@ def check_or_add(conn, text, near_index, file_id, row_num, category, candidate_c
         )
         near_index.add(signature, file_id, row_num)
     return "kept"
+
+
+def check_or_add(conn, text, near_index, file_id, row_num, category, candidate_cap):
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+    signature = simhash(text) if near_index is not None else None
+    return check_or_add_fingerprint(
+        conn, digest, signature, near_index, file_id, row_num, category,
+        candidate_cap,
+    )
 
 
 def export_keep_index(conn, output, file_id, expected_rows):
@@ -394,6 +430,10 @@ def run(args):
     processed_now = 0
     active_group = None
     near_index = None
+    executor = (
+        ProcessPoolExecutor(max_workers=args.workers, mp_context=get_context("spawn"))
+        if args.workers > 1 else None
+    )
     try:
         for position, (file_id, item) in enumerate(processing_order(files)):
             if args.max_files and position >= args.max_files:
@@ -420,44 +460,29 @@ def run(args):
             ]
             if not columns:
                 raise RuntimeError(f"No recognized text columns in {source}")
+            tasks = []
+            expected_counts = {}
             offset = 0
             for row_group in range(parquet.num_row_groups):
                 count = parquet.metadata.row_group(row_group).num_rows
-                if row_group in completed:
-                    offset += count
-                    continue
-                stats = Counter()
+                if row_group not in completed:
+                    tasks.append((source, item["category"], row_group, offset, columns,
+                                  executor is None))
+                    expected_counts[row_group] = count
+                offset += count
+            prepared = (executor.map(prepare_group, tasks) if executor is not None
+                        else map(prepare_group, tasks))
+            for row_group, count, filtered, fingerprints in prepared:
+                stats = Counter(rows=count, filtered=filtered)
                 conn.execute("BEGIN IMMEDIATE")
                 try:
-                    row_num = offset
-                    for batch in parquet.iter_batches(
-                        row_groups=[row_group], batch_size=256, columns=columns
-                    ):
-                        for row in batch.to_pylist():
-                            stats["rows"] += 1
-                            text = normalize(
-                                extract(row), item["category"].startswith("code")
-                            )
-                            if (
-                                len(text)
-                                < (30 if item["category"].startswith("code") else 50)
-                                or CTRL.search(text)
-                                or "\ufffd" in text
-                            ):
-                                stats["filtered"] += 1
-                            else:
-                                result = check_or_add(
-                                    conn,
-                                    text,
-                                    near_index,
-                                    file_id,
-                                    row_num,
-                                    item["category"],
-                                    args.candidate_cap,
-                                )
-                                stats[result] += 1
-                            row_num += 1
-                    if stats["rows"] != count:
+                    for row_num, digest, signature in fingerprints:
+                        result = check_or_add_fingerprint(
+                            conn, digest, signature, near_index, file_id,
+                            row_num, item["category"], args.candidate_cap,
+                        )
+                        stats[result] += 1
+                    if count != expected_counts[row_group]:
                         raise RuntimeError(
                             f"Row count changed in {source}, group {row_group}"
                         )
@@ -477,7 +502,6 @@ def run(args):
                 except BaseException:
                     conn.rollback()
                     raise
-                offset += count
                 processed_now += 1
                 print(
                     f"file={file_id + 1}/{len(files)} group={row_group + 1}/{parquet.num_row_groups} "
@@ -506,6 +530,8 @@ def run(args):
             atomic_json(args.output / "manifest.json", result)
         return result
     finally:
+        if executor is not None:
+            executor.shutdown(cancel_futures=True)
         conn.close()
 
 
@@ -515,6 +541,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--profile", choices=["astrai-100b"], required=True)
     parser.add_argument("--candidate-cap", type=int, default=2000)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
         "--max-files", type=int, default=0, help="pilot: process only first N files"
     )
@@ -525,7 +552,7 @@ def main():
         help="pilot: commit N groups, then stop",
     )
     args = parser.parse_args()
-    if args.candidate_cap < 1 or args.max_files < 0 or args.stop_after_groups < 0:
+    if args.candidate_cap < 1 or args.workers < 1 or args.max_files < 0 or args.stop_after_groups < 0:
         parser.error("numeric options must be positive (or zero for no limit)")
     run(args)
 

@@ -95,6 +95,17 @@ class PretrainTests(DatautilTestCase):
             self.assertEqual(main(command), 0)
         self.assertEqual(json.loads((output / "manifest.json").read_text()), result)
 
+        parallel = self.root / "parallel-index"
+        parallel_command = command[:-1] + [str(parallel), "--workers", "2"]
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(parallel_command + ["--stop-after-groups", "1"]), 0)
+            self.assertEqual(main(parallel_command), 0)
+        self.assertEqual(json.loads((parallel / "manifest.json").read_text()), result)
+        for keep_file in (output / "keep").glob("*.u64"):
+            self.assertEqual(
+                (parallel / "keep" / keep_file.name).read_bytes(), keep_file.read_bytes()
+            )
+
     def _recipe(self, **overrides):
         first = self.root / "web.jsonl"
         second = self.root / "books.parquet"

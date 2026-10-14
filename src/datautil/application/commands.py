@@ -389,7 +389,7 @@ def _execute(
         if getattr(args, "pretrain_command", "run") == "index":
             from datautil.pretrain.manifest_index import run as run_manifest_index
 
-            if args.candidate_cap < 1 or args.max_files < 0 or args.stop_after_groups < 0:
+            if args.candidate_cap < 1 or args.workers < 1 or args.max_files < 0 or args.stop_after_groups < 0:
                 raise DataError("invalid_argument", "Index numeric options must be positive or zero")
             args.manifest = Path(args.manifest)
             args.output = Path(args.output)

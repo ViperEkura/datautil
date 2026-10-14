@@ -216,6 +216,7 @@ def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
     pretrain_index.add_argument("--output", required=True, help="Persistent output directory")
     pretrain_index.add_argument("--profile", choices=["astrai-100b"], required=True)
     pretrain_index.add_argument("--candidate-cap", type=int, default=2000)
+    pretrain_index.add_argument("--workers", type=int, default=1)
     pretrain_index.add_argument("--max-files", type=int, default=0)
     pretrain_index.add_argument("--stop-after-groups", type=int, default=0)
 
