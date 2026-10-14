@@ -10,6 +10,7 @@ import yaml
 from datautil.application.commands import execute
 from datautil.application.parser import _parser
 from datautil.application.results import CommandResult, CommandSpec
+from datautil.application.routing import COMMAND_PATHS, resolve_operation
 from datautil.common.errors import DataError
 
 
@@ -56,10 +57,16 @@ class PipelineRunner:
                 raise DataError("invalid_pipeline", f"Duplicate step ID {identifier}")
             used.add(identifier)
             command = step["command"]
-            if command not in {
+            try:
+                operation = resolve_operation(command)
+            except DataError as exc:
+                raise DataError(
+                    "invalid_pipeline", f"Unsupported pipeline command {command}"
+                ) from exc
+            if operation not in {
                 "validate",
                 "convert",
-                "transform",
+                "clean",
                 "analyze",
                 "dedup scan",
                 "dedup apply",
@@ -71,7 +78,7 @@ class PipelineRunner:
                 raise DataError(
                     "invalid_pipeline", f"Unsupported pipeline command {command}"
                 )
-            args = command.split()
+            args = COMMAND_PATHS[operation].split()
             for key, value in step.items():
                 if key in {"id", "command"}:
                     continue
@@ -116,9 +123,7 @@ class PipelineRunner:
                 if key == "input":
                     args.append(str(value))
                 elif (
-                    key == "rules"
-                    and command == "transform"
-                    and isinstance(value, list)
+                    key == "rules" and operation == "clean" and isinstance(value, list)
                 ):
                     args.extend(
                         ["--rules-json", json.dumps({"version": 1, "rules": value})]
@@ -142,7 +147,7 @@ class PipelineRunner:
                 raise DataError(
                     "pipeline_step_failed", f"Step {identifier} exited with {status}"
                 )
-            if command == "analyze" and "output" in step:
+            if operation == "analyze" and "output" in step:
                 report_path = step["output"]
                 result.reports[identifier] = (
                     str(base / report_path)

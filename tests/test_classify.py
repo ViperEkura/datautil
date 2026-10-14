@@ -48,7 +48,15 @@ def classifier_server(label="code", status=200):
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/v1", requests
+        # Local fixtures must not use a workstation's external HTTP proxy.
+        with patch.dict(
+            "os.environ",
+            {
+                "NO_PROXY": "127.0.0.1,localhost,::1",
+                "no_proxy": "127.0.0.1,localhost,::1",
+            },
+        ):
+            yield f"http://127.0.0.1:{server.server_port}/v1", requests
     finally:
         server.shutdown()
         server.server_close()
@@ -76,6 +84,7 @@ class ClassifyTests(DatautilTestCase):
             patch.dict("os.environ", {"DATAUTIL_API_KEY": "test"}),
         ):
             args = [
+                "analyze",
                 "classify",
                 str(source),
                 "-o",
@@ -93,7 +102,7 @@ class ClassifyTests(DatautilTestCase):
             self.assertEqual(requests[0][1]["model"], "mock")
             self.assertEqual(requests[0][1]["temperature"], 0)
             self.assertEqual(requests[0][2], "Bearer test")
-            self.assertEqual(main(["stats", str(labels)]), 0)
+            self.assertEqual(main(["analyze", "labels", str(labels)]), 0)
             self.assertEqual(len(requests), 1)
 
         with (

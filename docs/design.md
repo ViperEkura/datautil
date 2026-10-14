@@ -2,6 +2,96 @@
 
 This document describes the current architecture and planned extensions. Status is stated per feature; a class in a diagram does not by itself imply a public Python interface.
 
+## CLI command system
+
+The CLI exposes four groups based on operation: `format`, `analyze`,
+`prepare`, and `pipeline`. Flat spellings remain compatible aliases.
+The implemented command tree is:
+
+```text
+datautil
+├── format
+│   ├── list
+│   ├── detect INPUT
+│   └── convert INPUT -o OUTPUT --to FORMAT
+├── analyze
+│   ├── inspect INPUT
+│   ├── validate INPUT [--to FORMAT]
+│   ├── summary INPUT [--json]
+│   ├── labels LABELS.jsonl [--by domain|usage_topic]
+│   └── classify INPUT (--sample N | --all) -o LABELS.jsonl
+├── prepare
+│   ├── clean INPUT -o OUTPUT --from FORMAT --rules RULES.yaml
+│   ├── dedup
+│   │   ├── scan INPUT -o GROUPS.jsonl
+│   │   └── apply INPUT --groups GROUPS.jsonl -o OUTPUT --keep first
+│   ├── sample INPUT -o OUTPUT --count N
+│   ├── split INPUT --train TRAIN --test TEST
+│   └── build RECIPE.yaml
+└── pipeline
+    └── run PIPELINE.yaml
+```
+
+Conversation operations accept the built-in OpenAI messages, ShareGPT,
+and Alpaca adapters or YAML profiles. `prepare build` accepts document
+JSONL and Parquet from its recipe. Standalone document conversion,
+inspection, validation, and reviewable document/paragraph dedup remain
+planned, as do `analyze score`, `analyze contamination scan`, and
+`pipeline validate`. Help registers only implemented actions.
+
+### Routing and compatibility
+
+`application/routing.py` maps user-facing command paths to stable
+application operation names. `application/parser.py` defines each
+operation's options once, then attaches the template under its group.
+Parsing returns the existing operation name to `CommandSpec`, so CLI
+and pipeline execution share the same handlers and report schemas.
+For example, both `analyze summary` and the flat `analyze INPUT`
+produce the existing `command: analyze` report. No route-specific
+fields are added to report parameters.
+
+Flat aliases are translated before argument parsing. `clean` maps
+to `prepare clean`, `stats` to `analyze labels`, `pretrain run`
+to `prepare build`, and `run` to `pipeline run`. The removed
+`transform` spelling is not restored. `analyze --help` shows the
+group; `analyze summary --help` shows the operation. A bare filename
+matching an analyze subcommand can be passed as a path such as
+`./labels` when using the legacy flat syntax.
+
+Pipeline YAML accepts grouped command strings such as
+`command: prepare clean` alongside previous spellings such as
+`command: clean`. Both resolve through the same routing table.
+The existing step allowlist remains in force, so nested pipeline runs
+and corpus builds are not accepted as generic pipeline steps.
+Inline cleaning rules and dataset references retain their behavior;
+summary output remains a report artifact instead of a dataset.
+`prepare build` uses its own recipe workflow.
+
+### Command contracts and future format support
+
+Use `INPUT` for datasets, `-o/--output` for the primary artifact,
+`--report` for JSONL summaries, `--from` and `--to` for formats,
+and `--seed` for reproducible selection. `--format-config` maps fields;
+`--rules` changes or filters records; planned `--checks` enforces
+quality constraints. Read-only results go to stdout; file-producing
+commands send summaries to stderr. `--json` selects machine-readable
+output where ASCII charts are default. Exit codes remain 0 success,
+1 data or operation error, 2 usage error, and 3 I/O error. Classification
+requires `--sample N` or `--all` before external model calls.
+
+As document adapters expand, an adapter should declare record kind and
+operation capabilities. Shared commands should dispatch through those
+capabilities rather than introduce separate `chat` and `corpus`
+command families. Unsupported combinations should fail before output
+replacement. Document/paragraph and conversation/user dedup scopes
+must keep distinct semantics and versioned artifacts.
+
+The [CLI Guidelines](https://clig.dev/) recommend consistent subcommand
+names, flags, help, and examples. The [GitHub CLI manual](https://cli.github.com/manual/gh_pr)
+shows two-level command families. The [uv CLI reference](https://docs.astral.sh/uv/reference/cli/)
+shows direct commands alongside nested families. These are interaction
+references, not project dependencies.
+
 ## Implemented package architecture
 
 The distribution keeps the standard `src/datautil` layout. Dependencies flow from the
@@ -31,7 +121,7 @@ CLI arguments and pipeline steps become `CommandSpec(name, options)`; the
 application dispatcher returns `CommandResult(exit_code, summary, datasets,
 reports)`. The CLI renders messages and exit codes. The pipeline resolves
 relative paths and `@step_id` references before calling the dispatcher, and
-stops on the first nonzero status. `pretrain run` remains independent of the
+stops on the first nonzero status. `prepare build` remains independent of the
 generic YAML pipeline.
 
 The stable Python exports are `Conversation`, `DatasetRecord`, `Message`,
@@ -54,7 +144,7 @@ The first interchange format is UTF-8 document JSONL, one complete document per 
 {"id":"source-0001","text":"First paragraph.\n\nSecond paragraph.","metadata":{"source":"web","url":"https://example.org/page"}}
 ```
 
-Preserve embedded newlines in `text`; a physical JSONL line is one document, not one paragraph. `pretrain run` reads generic JSONL and Parquet rows and maps their fields with YAML, including C4-style exports. PyArrow is a default dependency. Plain `.txt`, compressed shards, and a standalone document conversion command remain planned. Token IDs, tokenizer version, sequence packing, and training splits belong to a separate training export, since they depend on a particular model recipe. Do not put perplexity or dedup decisions into the source document body; write keyed score and decision artifacts.
+Preserve embedded newlines in `text`; a physical JSONL line is one document, not one paragraph. `prepare build` reads generic JSONL and Parquet rows and maps their fields with YAML, including C4-style exports. PyArrow is a default dependency. Plain `.txt`, compressed shards, and a standalone document conversion command remain planned. Token IDs, tokenizer version, sequence packing, and training splits belong to a separate training export, since they depend on a particular model recipe. Do not put perplexity or dedup decisions into the source document body; write keyed score and decision artifacts.
 
 The initial implementation round-trips text and JSON-compatible metadata through document JSONL or Parquet, derives IDs when absent, streams input batches, and stores corpus state in temporary SQLite files. Tests cover mixed JSONL/Parquet sources, metadata mapping, duplicate removal, and deterministic output. Remaining acceptance work includes broader malformed-row coverage, explicit cross-kind conversion diagnostics, and large-corpus disk and memory benchmarks.
 
@@ -62,7 +152,7 @@ The initial implementation round-trips text and JSON-compatible metadata through
 
 The first `gopher` and `c4` presets in `pretrain/quality.py` are explicitly opt-in English subsets, not exact reproductions of the original pipelines. They report rejection checks with measured values and thresholds; `quality.language: en` is required. Generic character limits work without a language preset. Full rule coverage, per-threshold overrides, versioned preset semantics, per-rule pass counts, and a labeled-sample benchmark remain planned. English-specific heuristics must not be silently applied to non-English or code corpora. See the [Gopher paper](https://arxiv.org/abs/2112.11446) and [T5/C4 paper](https://www.jmlr.org/papers/v21/20-074.html).
 
-`pretrain run` performs document-level exact and near deduplication, then removes repeated paragraphs split at blank lines. Its MinHash band buckets and candidate shingle sets live in temporary SQLite files; each LSH candidate still receives exact Jaccard verification. Candidate overflow fails explicitly. The optional decisions artifact records kept IDs, similarity, and paragraph index, and the operation applies these decisions immediately. A separate scan/review/apply workflow, character-span annotations, benchmarked peak memory and temporary disk use, and comparison with conversation dedup remain planned. Source order sets duplicate precedence; the subsequent document-count mix is computed from surviving documents.
+`prepare build` performs document-level exact and near deduplication, then removes repeated paragraphs split at blank lines. Its MinHash band buckets and candidate shingle sets live in temporary SQLite files; each LSH candidate still receives exact Jaccard verification. Candidate overflow fails explicitly. The optional decisions artifact records kept IDs, similarity, and paragraph index, and the operation applies these decisions immediately. A separate scan/review/apply workflow, character-span annotations, benchmarked peak memory and temporary disk use, and comparison with conversation dedup remain planned. Source order sets duplicate precedence; the subsequent document-count mix is computed from surviving documents.
 
 ## Local scoring and benchmark protection
 
@@ -74,14 +164,14 @@ Benchmark decontamination should precede evaluation-driven recipe selection. Bui
 
 | Layer | CLI | Responsibility | Status |
 |---|---|---|---|
-| Detection | `datautil detect INPUT` | Identify likely container and record format; detection does not establish validity | Available |
-| Structural validation | `datautil validate INPUT --from FORMAT` | Parse records and check required fields, types, roles, nonempty messages, tool result references, and duplicate record IDs | Available |
-| Quality checks | `datautil validate INPUT --from FORMAT --checks checks.yaml` | Apply configurable record and dataset constraints | Planned |
-| Export compatibility | `datautil validate INPUT --from FORMAT --to FORMAT` | Check whether the target adapter can serialize each record without loss | Available |
+| Detection | `datautil format detect INPUT` | Identify likely container and record format; detection does not establish validity | Available |
+| Structural validation | `datautil analyze validate INPUT --from FORMAT` | Parse records and check required fields, types, roles, nonempty messages, tool result references, and duplicate record IDs | Available |
+| Quality checks | `datautil analyze validate INPUT --from FORMAT --checks checks.yaml` | Apply configurable record and dataset constraints | Planned |
+| Export compatibility | `datautil analyze validate INPUT --from FORMAT --to FORMAT` | Check whether the target adapter can serialize each record without loss | Available |
 
 No separate `--mode` switch is needed. `--checks` adds quality checks and `--to` adds target compatibility checks to the same validation pass.
 
-`--format-config` defines where fields are located in a custom input or output format. It is distinct from `--checks`, which defines acceptable data values and relationships. `transform --rules` remains a data modification operation; validation must not modify records.
+`--format-config` defines where fields are located in a custom input or output format. It is distinct from `--checks`, which defines acceptable data values and relationships. `clean --rules` remains a data modification operation; validation must not modify records.
 
 ## Planned checks file
 
@@ -135,7 +225,7 @@ The earlier validation plan remains in the [validation layers](#validation-layer
 
 ### Large-file benchmark (phase 4, partial)
 
-The first implementation pass streams records for `sample`, `split`, `classify`, `analyze`, `transform`, and `dedup apply`. Temporary SQLite files hold IDs, group membership, or selection decisions. `dedup scan` stores normalized text and shingles in SQLite while retaining the `datasketch` MinHash LSH index and match graph in memory. Temporary disk use therefore grows with input size, and dedup scanning is not constant-memory.
+The first implementation pass streams records for `sample`, `split`, `classify`, `analyze`, `clean`, and `dedup apply`. Temporary SQLite files hold IDs, group membership, or selection decisions. `dedup scan` stores normalized text and shingles in SQLite while retaining the `datasketch` MinHash LSH index and match graph in memory. Temporary disk use therefore grows with input size, and dedup scanning is not constant-memory.
 
 Measured on 5090x8 with Python 3.12 and `/usr/bin/time`, using 100,000 synthetic records in an 18 MB JSONL file (5,000 records for the candidate-heavy scan):
 
@@ -145,7 +235,7 @@ Measured on 5090x8 with Python 3.12 and `/usr/bin/time`, using 100,000 synthetic
 | `split --test-ratio 0.1` | 147 MiB | 31 MiB | 1.42 s | 4.51 s | 90,000 train / 10,000 test; deterministic assignment changed |
 | `dedup apply` with 10,000 pairs | 140 MiB | 29 MiB | 2.28 s | 3.92 s | Dataset output byte-identical |
 | `analyze --json` | 36 MiB | 28 MiB | 2.36 s | 2.70 s | Output byte-identical |
-| `transform --rules` | 36 MiB | 28 MiB | 2.98 s | 3.24 s | Output byte-identical |
+| `clean --rules` | 36 MiB | 28 MiB | 2.98 s | 3.24 s | Output byte-identical |
 | `dedup scan` on 5,000 similar records | 240 MiB | 176 MiB | 25.08 s | 49.90 s | Group file byte-identical |
 
 These are local measurements, not performance guarantees. The 5,000-record scan generated over three million LSH candidates; its cost is highly dependent on input similarity. Further work should benchmark less repetitive datasets, measure temporary disk use, and evaluate a disk-backed candidate index without changing the exact-match and Jaccard checks.

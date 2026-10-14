@@ -1,7 +1,7 @@
 version: 1
 steps:
   - id: cleaned
-    command: transform
+    command: prepare clean
     input: source.jsonl
     output: cleaned.jsonl
     from: openai-messages
@@ -13,7 +13,7 @@ steps:
           min_messages: 2
           roles_all: [user, assistant]
   - id: sampled
-    command: sample
+    command: prepare sample
     input: "@cleaned"
     output: sample.jsonl
     from: openai-messages

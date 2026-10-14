@@ -22,7 +22,7 @@ class PipelineTests(DatautilTestCase):
             next(iter_raw(str(self.root / "analysis.jsonl")))[1]["message_count"], 2
         )
 
-    def test_transform_rules_clean_filter_and_report(self):
+    def test_clean_rules_filter_and_report(self):
         source = self.root / "source.jsonl"
         output = self.root / "cleaned.jsonl"
         report = self.root / "report.jsonl"
@@ -51,7 +51,7 @@ class PipelineTests(DatautilTestCase):
         self.assertEqual(
             main(
                 [
-                    "transform",
+                    "clean",
                     str(source),
                     "-o",
                     str(output),
@@ -69,7 +69,9 @@ class PipelineTests(DatautilTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["messages"][0]["content"], "Hi")
         self.assertEqual(len(items[0]["messages"]), 2)
-        self.assertEqual(next(iter_raw(str(report)))[1]["dropped_by_rule"], {"2": 1})
+        summary = next(iter_raw(str(report)))[1]
+        self.assertEqual(summary["command"], "clean")
+        self.assertEqual(summary["dropped_by_rule"], {"2": 1})
 
     def test_pipeline_inline_rules_then_sample(self):
         source = self.root / "source.jsonl"
@@ -87,7 +89,7 @@ class PipelineTests(DatautilTestCase):
             ],
         )
         pipeline.write_text(
-            "version: 1\nsteps:\n  - id: cleaned\n    command: transform\n    input: source.jsonl\n    output: cleaned.jsonl\n    from: openai-messages\n    rules:\n      - op: trim_content\n  - id: sample\n    command: sample\n    input: '@cleaned'\n    output: sampled.jsonl\n    from: openai-messages\n    count: 1\n",
+            "version: 1\nsteps:\n  - id: cleaned\n    command: clean\n    input: source.jsonl\n    output: cleaned.jsonl\n    from: openai-messages\n    rules:\n      - op: trim_content\n  - id: sample\n    command: sample\n    input: '@cleaned'\n    output: sampled.jsonl\n    from: openai-messages\n    count: 1\n",
             encoding="utf-8",
         )
         self.assertEqual(main(["run", str(pipeline)]), 0)

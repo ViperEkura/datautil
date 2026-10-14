@@ -30,7 +30,9 @@ class ArchitectureTests(DatautilTestCase):
         ):
             output = io.StringIO()
             with redirect_stdout(output):
-                self.assertEqual(main(["formats", "--format-config", str(profile)]), 0)
+                self.assertEqual(
+                    main(["format", "list", "--format-config", str(profile)]), 0
+                )
             names = {item["name"] for item in json.loads(output.getvalue())["formats"]}
             self.assertIn(present, names)
             self.assertNotIn(absent, names)

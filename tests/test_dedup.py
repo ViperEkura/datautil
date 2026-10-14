@@ -238,10 +238,10 @@ class DedupTests(DatautilTestCase):
         )
         self.assertIn("datasketch_version", summary)
         pipeline.write_text(
-            "steps:\n  - id: duplicates\n    command: dedup scan\n    input: source.jsonl\n    output: pipeline-groups.jsonl\n    from: openai-messages\n    scope: user\n",
+            "steps:\n  - id: duplicates\n    command: prepare dedup scan\n    input: source.jsonl\n    output: pipeline-groups.jsonl\n    from: openai-messages\n    scope: user\n",
             encoding="utf-8",
         )
-        self.assertEqual(main(["run", str(pipeline)]), 0)
+        self.assertEqual(main(["pipeline", "run", str(pipeline)]), 0)
         self.assertEqual(
             next(iter_raw(str(self.root / "pipeline-groups.jsonl")))[1]["record_ids"],
             ["a", "b"],

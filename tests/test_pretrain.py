@@ -79,7 +79,7 @@ class PretrainTests(DatautilTestCase):
     def test_map_parquet_mix_dedup_and_repeat(self):
         config = self._recipe()
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(main(["pretrain", "run", str(config)]), 0)
+            self.assertEqual(main(["prepare", "build", str(config)]), 0)
         output = self.root / "mixed.jsonl"
         first = output.read_bytes()
         rows = [row for _, row in iter_raw(str(output))]

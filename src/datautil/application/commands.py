@@ -149,7 +149,7 @@ def _execute(
         )
         _report(args, result)
         return 1 if result["skipped_count"] else 0
-    if args.command == "transform":
+    if args.command == "clean":
         try:
             document = json.loads(args.rules_json) if args.rules_json else None
         except json.JSONDecodeError as exc:
