@@ -12,7 +12,7 @@ import re
 import sqlite3
 import struct
 from array import array
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
 from multiprocessing import get_context
@@ -275,6 +275,30 @@ def prepare_group(task):
     return row_group, count, filtered, fingerprints
 
 
+def ordered_prepared_groups(executor, tasks, workers):
+    """Prepare groups across file boundaries with bounded, ordered results."""
+    source = iter(tasks)
+    pending = deque()
+
+    def submit(task):
+        file_id, item, path, row_group, offset, columns, expected, groups, rows = task
+        work = (path, item["category"], row_group, offset, columns, False)
+        pending.append((task, executor.submit(prepare_group, work)))
+
+    for _ in range(workers * 2):
+        task = next(source, None)
+        if task is None:
+            break
+        submit(task)
+    while pending:
+        task, future = pending.popleft()
+        result = future.result()
+        following = next(source, None)
+        if following is not None:
+            submit(following)
+        yield task, result
+
+
 def check_or_add_fingerprint(
     conn, digest, signature, near_index, file_id, row_num, category, candidate_cap
 ):
@@ -435,6 +459,7 @@ def run(args):
         if args.workers > 1 else None
     )
     try:
+        tasks = []
         for position, (file_id, item) in enumerate(processing_order(files)):
             if args.max_files and position >= args.max_files:
                 break
@@ -449,10 +474,6 @@ def run(args):
             if len(completed) == parquet.num_row_groups:
                 export_keep_index(conn, args.output, file_id, parquet.metadata.num_rows)
                 continue
-            group = near_group(item["category"])
-            if group != active_group:
-                near_index = NearIndex(conn, group, group_rows[group]) if group else None
-                active_group = group
             columns = [
                 name
                 for name in parquet.schema_arrow.names
@@ -460,65 +481,69 @@ def run(args):
             ]
             if not columns:
                 raise RuntimeError(f"No recognized text columns in {source}")
-            tasks = []
-            expected_counts = {}
             offset = 0
             for row_group in range(parquet.num_row_groups):
                 count = parquet.metadata.row_group(row_group).num_rows
                 if row_group not in completed:
-                    tasks.append((source, item["category"], row_group, offset, columns,
-                                  executor is None))
-                    expected_counts[row_group] = count
+                    tasks.append((file_id, item, source, row_group, offset, columns,
+                                  count, parquet.num_row_groups, parquet.metadata.num_rows))
                 offset += count
-            prepared = (executor.map(prepare_group, tasks) if executor is not None
-                        else map(prepare_group, tasks))
-            for row_group, count, filtered, fingerprints in prepared:
-                stats = Counter(rows=count, filtered=filtered)
-                conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for row_num, digest, signature in fingerprints:
-                        result = check_or_add_fingerprint(
-                            conn, digest, signature, near_index, file_id,
-                            row_num, item["category"], args.candidate_cap,
-                        )
-                        stats[result] += 1
-                    if count != expected_counts[row_group]:
-                        raise RuntimeError(
-                            f"Row count changed in {source}, group {row_group}"
-                        )
-                    conn.execute(
-                        "INSERT INTO progress VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            file_id,
-                            row_group,
-                            count,
-                            stats["kept"],
-                            stats["exact"],
-                            stats["near"],
-                            stats["filtered"],
-                        ),
+        if executor is not None:
+            prepared = ordered_prepared_groups(executor, tasks, args.workers)
+        else:
+            prepared = (
+                (task, prepare_group((task[2], task[1]["category"], task[3],
+                                      task[4], task[5], True)))
+                for task in tasks
+            )
+        previous_file = None
+        for task, (row_group, count, filtered, fingerprints) in prepared:
+            file_id, item, source, expected_group, offset, columns, expected, groups, rows = task
+            if previous_file is not None and file_id != previous_file[0]:
+                export_keep_index(conn, args.output, previous_file[0], previous_file[1])
+            previous_file = (file_id, rows)
+            group = near_group(item["category"])
+            if group != active_group:
+                near_index = NearIndex(conn, group, group_rows[group]) if group else None
+                active_group = group
+            if row_group != expected_group or count != expected:
+                raise RuntimeError(f"Row count changed in {source}, group {row_group}")
+            stats = Counter(rows=count, filtered=filtered)
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for row_num, digest, signature in fingerprints:
+                    result = check_or_add_fingerprint(
+                        conn, digest, signature, near_index, file_id,
+                        row_num, item["category"], args.candidate_cap,
                     )
-                    conn.commit()
-                except BaseException:
-                    conn.rollback()
-                    raise
-                processed_now += 1
-                print(
-                    f"file={file_id + 1}/{len(files)} group={row_group + 1}/{parquet.num_row_groups} "
-                    f"category={item['category']} rows={stats['rows']} kept={stats['kept']} "
-                    f"exact={stats['exact']} near={stats['near']} filtered={stats['filtered']}",
-                    flush=True,
+                    stats[result] += 1
+                conn.execute(
+                    "INSERT INTO progress VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (file_id, row_group, count, stats["kept"], stats["exact"],
+                     stats["near"], stats["filtered"]),
                 )
-                if processed_now % 10 == 0:
-                    atomic_json(
-                        args.output / "status.json",
-                        summary(conn, files, args.output, False),
-                    )
-                if args.stop_after_groups and processed_now >= args.stop_after_groups:
-                    result = summary(conn, files, args.output, False)
-                    atomic_json(args.output / "status.json", result)
-                    return result
-            export_keep_index(conn, args.output, file_id, parquet.metadata.num_rows)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            processed_now += 1
+            print(
+                f"file={file_id + 1}/{len(files)} group={row_group + 1}/{groups} "
+                f"category={item['category']} rows={stats['rows']} kept={stats['kept']} "
+                f"exact={stats['exact']} near={stats['near']} filtered={stats['filtered']}",
+                flush=True,
+            )
+            if processed_now % 10 == 0:
+                atomic_json(
+                    args.output / "status.json",
+                    summary(conn, files, args.output, False),
+                )
+            if args.stop_after_groups and processed_now >= args.stop_after_groups:
+                result = summary(conn, files, args.output, False)
+                atomic_json(args.output / "status.json", result)
+                return result
+        if previous_file is not None:
+            export_keep_index(conn, args.output, previous_file[0], previous_file[1])
         total_groups = sum(
             pq.ParquetFile(raw_root / item["output_file"]).num_row_groups
             for item in files
