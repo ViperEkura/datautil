@@ -18,6 +18,26 @@ from datautil.pretrain.sources import iter_documents
 
 
 class PretrainTests(DatautilTestCase):
+    def test_compact_manifest_index_prefers_l2_math_over_l1_math(self):
+        shared = "A mathematical derivation with enough explanatory words to exceed the minimum text length."
+        files = []
+        for category in ("math1", "math2"):
+            path = self.root / f"{category}.parquet"
+            pq.write_table(pa.table({"text": [shared]}), path)
+            files.append({"category": category, "output_file": path.name, "bytes": path.stat().st_size})
+        manifest = self.root / "math-manifest.json"
+        manifest.write_text(json.dumps({"status": "downloaded", "files": files}), encoding="utf-8")
+        output = self.root / "math-index"
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main([
+                "prepare", "pretrain-index", "--profile", "astrai-100b",
+                "--manifest", str(manifest), "--output", str(output),
+            ]), 0)
+        result = json.loads((output / "manifest.json").read_text())
+        self.assertEqual(result["categories"]["math2"]["kept"], 1)
+        self.assertEqual(result["categories"]["math1"]["exact"], 1)
+        self.assertEqual(struct.unpack("<Q", (output / "keep" / "0001.u64").read_bytes()), (0,))
+
     def test_compact_manifest_index_resumes_and_prefers_l3(self):
         shared = "A shared document with enough English words to pass the minimum length filter."
         files = []

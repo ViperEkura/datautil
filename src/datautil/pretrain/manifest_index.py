@@ -124,6 +124,18 @@ def ordered_files(manifest):
     )
 
 
+def tier(category):
+    match = re.match(r"^(?:web|code|math)([123])(?:_|$)", category)
+    if match is None:
+        raise RuntimeError(f"Unknown pretraining tier: {category}")
+    return int(match.group(1))
+
+
+def processing_order(files):
+    # Keep manifest file IDs stable across resumptions, but retain higher tiers first.
+    return sorted(enumerate(files), key=lambda pair: (3 - tier(pair[1]["category"]), pair[0]))
+
+
 def open_db(path, identity):
     conn = sqlite3.connect(str(path), timeout=120)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -319,8 +331,8 @@ def run(args):
     conn = open_db(args.output / "dedup.sqlite", identity)
     processed_now = 0
     try:
-        for file_id, item in enumerate(files):
-            if args.max_files and file_id >= args.max_files:
+        for position, (file_id, item) in enumerate(processing_order(files)):
+            if args.max_files and position >= args.max_files:
                 break
             source = raw_root / item["output_file"]
             parquet = pq.ParquetFile(source)
