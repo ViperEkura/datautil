@@ -19,6 +19,7 @@ COMMAND_PATHS: Dict[str, str] = {
     "sample": "prepare sample",
     "split": "prepare split",
     "pretrain run": "prepare build",
+    "pretrain index": "prepare pretrain-index",
     "run": "pipeline run",
 }
 
@@ -57,6 +58,8 @@ def normalize_argv(argv: Sequence[str]) -> List[str]:
     if name == "pretrain":
         if len(args) > 1 and args[1] == "run":
             return ["prepare", "build"] + args[2:]
+        if len(args) > 1 and args[1] == "index":
+            return ["prepare", "pretrain-index"] + args[2:]
         if len(args) > 1 and args[1] in {"-h", "--help"}:
             return ["prepare", "build"] + args[1:]
         return args

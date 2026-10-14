@@ -1,5 +1,7 @@
 import io
+import json
 import sqlite3
+import struct
 from contextlib import redirect_stderr
 
 import pyarrow as pa
@@ -16,6 +18,49 @@ from datautil.pretrain.sources import iter_documents
 
 
 class PretrainTests(DatautilTestCase):
+    def test_compact_manifest_index_resumes_and_prefers_l3(self):
+        shared = "A shared document with enough English words to pass the minimum length filter."
+        files = []
+        for category, name, texts in (
+            ("web2_en", "natural.parquet", [shared, "A separate natural web document with enough words to keep."]),
+            ("web3_en_QA-Synthetic", "synthetic.parquet", [shared, "A separate synthetic document with enough words to keep."]),
+        ):
+            path = self.root / name
+            pq.write_table(pa.table({"text": texts}), path)
+            files.append({
+                "category": category,
+                "output_file": name,
+                "bytes": path.stat().st_size,
+            })
+        manifest = self.root / "raw-manifest.json"
+        manifest.write_text(json.dumps({"status": "downloaded", "files": files}), encoding="utf-8")
+        output = self.root / "compact-index"
+        command = [
+            "prepare", "pretrain-index", "--profile", "astrai-100b",
+            "--manifest", str(manifest), "--output", str(output),
+        ]
+        stale = self.root / "stale-index"
+        (stale / "keep").mkdir(parents=True)
+        (stale / "keep" / "0000.u64").write_bytes(struct.pack("<Q", 0))
+        with redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(main(command[:-1] + [str(stale)]), 1)
+        self.assertIn("no matching dedup.sqlite", error.getvalue())
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(command + ["--stop-after-groups", "1"]), 0)
+        self.assertEqual(json.loads((output / "status.json").read_text())["status"], "partial")
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(command), 0)
+        result = json.loads((output / "manifest.json").read_text())
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["categories"]["web2_en"]["exact"], 1)
+        self.assertEqual(result["categories"]["web3_en_QA-Synthetic"]["kept"], 2)
+        self.assertEqual(
+            struct.unpack("<Q", (output / "keep" / "0001.u64").read_bytes()), (1,)
+        )
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(command), 0)
+        self.assertEqual(json.loads((output / "manifest.json").read_text()), result)
+
     def _recipe(self, **overrides):
         first = self.root / "web.jsonl"
         second = self.root / "books.parquet"

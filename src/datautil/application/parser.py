@@ -209,6 +209,16 @@ def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
     )
     pretrain_run.add_argument("config", metavar="YAML")
 
+    pretrain_index = command(
+        "pretrain index", "Build a compact, resumable Parquet keep index"
+    )
+    pretrain_index.add_argument("--manifest", required=True, help="Input Parquet manifest JSON")
+    pretrain_index.add_argument("--output", required=True, help="Persistent output directory")
+    pretrain_index.add_argument("--profile", choices=["astrai-100b"], required=True)
+    pretrain_index.add_argument("--candidate-cap", type=int, default=2000)
+    pretrain_index.add_argument("--max-files", type=int, default=0)
+    pretrain_index.add_argument("--stop-after-groups", type=int, default=0)
+
     run = command("run", "Run a YAML pipeline")
     run.add_argument("pipeline")
     return templates
@@ -262,4 +272,6 @@ def _parser() -> argparse.ArgumentParser:
             leaf.set_defaults(dedup_command=operation.split()[1])
         elif operation == "pretrain run":
             leaf.set_defaults(pretrain_command="run")
+        elif operation == "pretrain index":
+            leaf.set_defaults(pretrain_command="index")
     return parser

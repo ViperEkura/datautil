@@ -7,6 +7,7 @@ import os
 import random
 import tempfile
 from collections import Counter
+from pathlib import Path
 from typing import Any, Callable
 
 from datautil import __version__
@@ -385,6 +386,30 @@ def _execute(
         )
         return 0
     if args.command == "pretrain":
+        if getattr(args, "pretrain_command", "run") == "index":
+            from datautil.pretrain.manifest_index import run as run_manifest_index
+
+            if args.candidate_cap < 1 or args.max_files < 0 or args.stop_after_groups < 0:
+                raise DataError("invalid_argument", "Index numeric options must be positive or zero")
+            args.manifest = Path(args.manifest)
+            args.output = Path(args.output)
+            try:
+                result = run_manifest_index(args)
+            except RuntimeError as exc:
+                raise DataError("pretrain_index", str(exc)) from exc
+            rows = sum(item["rows"] for item in result["categories"].values())
+            kept = sum(item["kept"] for item in result["categories"].values())
+            outcome.summary = {
+                "status": result["status"],
+                "rows": rows,
+                "kept": kept,
+                "output": str(args.output),
+                "status_file": str(args.output / "status.json"),
+            }
+            outcome.messages.append(
+                ("stderr", json.dumps(outcome.summary, ensure_ascii=False, sort_keys=True))
+            )
+            return 0
         result = run_recipe(args.config)
         outcome.summary = result
         outcome.messages.append(

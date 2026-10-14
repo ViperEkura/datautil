@@ -7,6 +7,7 @@ import json
 import re
 import sqlite3
 import unicodedata
+import zlib
 from dataclasses import dataclass
 
 from datasketch import MinHash, MinHashLSH
@@ -53,18 +54,23 @@ class DocumentDedupIndex:
         else:
             self.bands = self.rows = 0
         connection.execute(
-            "CREATE TABLE dedup_entries (entry_id INTEGER PRIMARY KEY, scope TEXT NOT NULL, owner_id TEXT NOT NULL, digest BLOB NOT NULL, normalized TEXT NOT NULL, token_digest BLOB NOT NULL, tokens TEXT NOT NULL)"
+            "CREATE TABLE dedup_entries (entry_id INTEGER PRIMARY KEY, scope TEXT NOT NULL, "
+            "owner_id TEXT NOT NULL, digest BLOB NOT NULL, normalized_bytes INTEGER NOT NULL, "
+            "token_digest BLOB, tokens BLOB)"
         )
         connection.execute("CREATE INDEX dedup_exact ON dedup_entries (scope, digest)")
-        connection.execute(
-            "CREATE INDEX dedup_tokens ON dedup_entries (scope, token_digest)"
-        )
-        connection.execute(
-            "CREATE TABLE dedup_buckets (scope TEXT NOT NULL, band INTEGER NOT NULL, signature BLOB NOT NULL, entry_id INTEGER NOT NULL)"
-        )
-        connection.execute(
-            "CREATE INDEX dedup_bucket_lookup ON dedup_buckets (scope, band, signature)"
-        )
+        if threshold == 1:
+            connection.execute(
+                "CREATE INDEX dedup_tokens ON dedup_entries (scope, token_digest)"
+            )
+        else:
+            connection.execute(
+                "CREATE TABLE dedup_buckets (scope TEXT NOT NULL, band INTEGER NOT NULL, "
+                "signature BLOB NOT NULL, entry_id INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "CREATE INDEX dedup_bucket_lookup ON dedup_buckets (scope, band, signature)"
+            )
         self.candidate_count = 0
         self.exact_count = 0
         self.near_count = 0
@@ -85,10 +91,12 @@ class DocumentDedupIndex:
 
     def check_or_add(self, text: str, scope: str, owner_id: str) -> Match | None:
         normalized = self.normalize(text)
-        digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+        normalized_bytes = normalized.encode("utf-8")
+        digest = hashlib.sha256(normalized_bytes).digest()
         row = self.connection.execute(
-            "SELECT owner_id FROM dedup_entries WHERE scope=? AND digest=? AND normalized=? LIMIT 1",
-            (scope, digest, normalized),
+            "SELECT owner_id FROM dedup_entries WHERE scope=? AND digest=? "
+            "AND normalized_bytes=? LIMIT 1",
+            (scope, digest, len(normalized_bytes)),
         ).fetchone()
         if row is not None:
             self.exact_count += 1
@@ -100,8 +108,8 @@ class DocumentDedupIndex:
         token_digest = hashlib.sha256(serialized.encode("utf-8")).digest()
         if self.threshold == 1:
             row = self.connection.execute(
-                "SELECT owner_id FROM dedup_entries WHERE scope=? AND token_digest=? AND tokens=? LIMIT 1",
-                (scope, token_digest, serialized),
+                "SELECT owner_id FROM dedup_entries WHERE scope=? AND token_digest=? LIMIT 1",
+                (scope, token_digest),
             ).fetchone()
             if row is not None:
                 self.near_count += 1
@@ -132,15 +140,24 @@ class DocumentDedupIndex:
                     "SELECT owner_id, tokens FROM dedup_entries WHERE entry_id=?",
                     (entry_id,),
                 ).fetchone()
-                other = set(json.loads(row[1]))
+                other = set(json.loads(zlib.decompress(row[1])))
                 union = tokens | other
                 similarity = len(tokens & other) / len(union) if union else 1.0
                 if similarity >= self.threshold:
                     self.near_count += 1
                     return Match(row[0], round(similarity, 4), "near")
         cursor = self.connection.execute(
-            "INSERT INTO dedup_entries (scope, owner_id, digest, normalized, token_digest, tokens) VALUES (?, ?, ?, ?, ?, ?)",
-            (scope, owner_id, digest, normalized, token_digest, serialized),
+            "INSERT INTO dedup_entries (scope, owner_id, digest, normalized_bytes, "
+            "token_digest, tokens) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                scope,
+                owner_id,
+                digest,
+                len(normalized_bytes),
+                token_digest if self.threshold == 1 else None,
+                zlib.compress(serialized.encode("utf-8"), level=1)
+                if self.threshold < 1 else None,
+            ),
         )
         if signature is not None:
             for band in range(self.bands):
