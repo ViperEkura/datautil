@@ -12,76 +12,107 @@ from support import DatautilTestCase, write_jsonl
 from datautil.cli import main
 from datautil.common.io import iter_raw
 from datautil.pretrain.dedup import DocumentDedupIndex
-from datautil.pretrain.manifest_index import NearIndex, open_db
 from datautil.pretrain.model import DocumentRecord
 from datautil.pretrain.quality import document_quality_issues
 from datautil.pretrain.sources import iter_documents
 
 
 class PretrainTests(DatautilTestCase):
-    def test_compact_near_index_finds_all_three_bit_changes(self):
-        conn = open_db(self.root / "near-index.sqlite", {"schema": "test"})
-        index = NearIndex(conn, "math", 1)
-        signature = 0x123456789ABCDEF0
-        index.add(signature, 2, 17)
-        for changed_bits in ((0, 1, 2), (0, 20, 40), (10, 25, 53), (30, 31, 63)):
-            changed = signature
-            for bit in changed_bits:
-                changed ^= 1 << bit
-            self.assertEqual(index.find(changed, 2000, 3, 0), (2, 17, 3))
-        self.assertIsNone(index.find(signature ^ 0b1111, 2000, 3, 0))
-        conn.close()
-
     def test_compact_manifest_index_prefers_l2_math_over_l1_math(self):
         shared = "A mathematical derivation with enough explanatory words to exceed the minimum text length."
         files = []
         for category in ("math1", "math2"):
             path = self.root / f"{category}.parquet"
             pq.write_table(pa.table({"text": [shared]}), path)
-            files.append({"category": category, "output_file": path.name, "bytes": path.stat().st_size})
+            files.append(
+                {
+                    "category": category,
+                    "output_file": path.name,
+                    "bytes": path.stat().st_size,
+                }
+            )
         manifest = self.root / "math-manifest.json"
-        manifest.write_text(json.dumps({"status": "downloaded", "files": files}), encoding="utf-8")
+        manifest.write_text(
+            json.dumps({"status": "downloaded", "files": files}), encoding="utf-8"
+        )
         output = self.root / "math-index"
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(main([
-                "prepare", "pretrain-index", "--profile", "astrai-100b",
-                "--manifest", str(manifest), "--output", str(output),
-            ]), 0)
+            self.assertEqual(
+                main(
+                    [
+                        "prepare",
+                        "pretrain-index",
+                        "--profile",
+                        "astrai-100b",
+                        "--manifest",
+                        str(manifest),
+                        "--output",
+                        str(output),
+                        "--shards",
+                        "4",
+                    ]
+                ),
+                0,
+            )
         result = json.loads((output / "manifest.json").read_text())
         self.assertEqual(result["categories"]["math2"]["kept"], 1)
         self.assertEqual(result["categories"]["math1"]["exact"], 1)
-        self.assertEqual(struct.unpack("<Q", (output / "keep" / "0001.u64").read_bytes()), (0,))
+        self.assertEqual(
+            struct.unpack("<Q", (output / "keep" / "0001.u64").read_bytes()), (0,)
+        )
 
     def test_compact_manifest_index_resumes_and_prefers_l3(self):
         shared = "A shared document with enough English words to pass the minimum length filter."
         files = []
         for category, name, texts in (
-            ("web2_en", "natural.parquet", [shared, "A separate natural web document with enough words to keep."]),
-            ("web3_en_QA-Synthetic", "synthetic.parquet", [shared, "A separate synthetic document with enough words to keep."]),
+            (
+                "web2_en",
+                "natural.parquet",
+                [shared, "A separate natural web document with enough words to keep."],
+            ),
+            (
+                "web3_en_QA-Synthetic",
+                "synthetic.parquet",
+                [shared, "A separate synthetic document with enough words to keep."],
+            ),
         ):
             path = self.root / name
             pq.write_table(pa.table({"text": texts}), path)
-            files.append({
-                "category": category,
-                "output_file": name,
-                "bytes": path.stat().st_size,
-            })
+            files.append(
+                {
+                    "category": category,
+                    "output_file": name,
+                    "bytes": path.stat().st_size,
+                }
+            )
         manifest = self.root / "raw-manifest.json"
-        manifest.write_text(json.dumps({"status": "downloaded", "files": files}), encoding="utf-8")
+        manifest.write_text(
+            json.dumps({"status": "downloaded", "files": files}), encoding="utf-8"
+        )
         output = self.root / "compact-index"
         command = [
-            "prepare", "pretrain-index", "--profile", "astrai-100b",
-            "--manifest", str(manifest), "--output", str(output),
+            "prepare",
+            "pretrain-index",
+            "--profile",
+            "astrai-100b",
+            "--shards",
+            "4",
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(output),
         ]
         stale = self.root / "stale-index"
         (stale / "keep").mkdir(parents=True)
         (stale / "keep" / "0000.u64").write_bytes(struct.pack("<Q", 0))
         with redirect_stderr(io.StringIO()) as error:
             self.assertEqual(main(command[:-1] + [str(stale)]), 1)
-        self.assertIn("no matching dedup.sqlite", error.getvalue())
+        self.assertIn("no matching plan.json", error.getvalue())
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(main(command + ["--stop-after-groups", "1"]), 0)
-        self.assertEqual(json.loads((output / "status.json").read_text())["status"], "partial")
+            self.assertEqual(main(command + ["--stop-after-tasks", "1"]), 0)
+        self.assertEqual(
+            json.loads((output / "status.json").read_text())["status"], "partial"
+        )
         with redirect_stderr(io.StringIO()):
             self.assertEqual(main(command), 0)
         result = json.loads((output / "manifest.json").read_text())
@@ -98,12 +129,13 @@ class PretrainTests(DatautilTestCase):
         parallel = self.root / "parallel-index"
         parallel_command = command[:-1] + [str(parallel), "--workers", "2"]
         with redirect_stderr(io.StringIO()):
-            self.assertEqual(main(parallel_command + ["--stop-after-groups", "1"]), 0)
+            self.assertEqual(main(parallel_command + ["--stop-after-tasks", "1"]), 0)
             self.assertEqual(main(parallel_command), 0)
         self.assertEqual(json.loads((parallel / "manifest.json").read_text()), result)
         for keep_file in (output / "keep").glob("*.u64"):
             self.assertEqual(
-                (parallel / "keep" / keep_file.name).read_bytes(), keep_file.read_bytes()
+                (parallel / "keep" / keep_file.name).read_bytes(),
+                keep_file.read_bytes(),
             )
 
     def _recipe(self, **overrides):

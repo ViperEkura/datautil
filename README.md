@@ -187,6 +187,14 @@ datautil format convert conversations.jsonl -o custom.jsonl \
 
 Only dotted object-key paths are supported, such as `request.prompt`; arrays and expressions are not evaluated. Top-level unmapped fields are preserved as metadata. Unmapped fields within a message cause an error unless explicitly listed under `ignore_message_fields` in the profile. Tool calls require `tool_calls` and `tool_call_id` mappings; otherwise conversion fails rather than dropping them.
 
+## Parquet keep indexes
+
+`prepare pretrain-index` builds a resumable Parquet keep index from an input manifest. Select a supported policy with `--profile`; use `--workers` for parallel jobs and `--shards` for disk partitions. Stages cover input hashing, global exact reduction, exact keep indexes, MinHash signatures, LSH buckets, candidate generation, full-content verification, and final representative selection. SQLite is not used in this command's hot path.
+
+MinHash/LSH produces candidates. Removal requires full-content Jaccard verification and preservation of code tokens and mathematical numbers/formulas according to the policy. Code lexing uses Pygments; uncertain lexing keeps the sample. Large buckets compare several priority representatives, so recall is approximate and unmatched records remain. Final removal requires a direct verified relationship to a retained representative, preventing deletion through transitive chains.
+
+Each stage commits independent binary shards and a completion marker. Relaunch with identical input and policy to resume; worker count may change. `--stop-after-tasks` limits newly committed job units for a pilot. `--stop-after-groups` is a deprecated alias and now counts stage jobs. Old SQLite-based outputs cannot be reused: choose a fresh directory. Input files remain unchanged; `keep/*.u64` stores retained zero-based source row numbers. `audit/` contains deletion pairs and deterministic hash-priority samples across the full stream, with field layouts in the output manifest.
+
 ## Configurable processing
 
 `datautil prepare clean` applies a versioned YAML rule list in order. Supported operations are `trim_content`, `collapse_whitespace`, `replace_text`, `drop_empty_messages`, and `keep_if`. `keep_if` combines `min_messages`, `max_messages`, `min_chars`, `max_chars`, `roles_all`, and `roles_any` with AND. Records failing a condition are dropped and counted by rule; remaining records are validated before output. See [`examples/clean-rules.yaml`](examples/clean-rules.yaml).

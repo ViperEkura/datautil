@@ -212,13 +212,24 @@ def _argument_templates() -> Dict[str, argparse.ArgumentParser]:
     pretrain_index = command(
         "pretrain index", "Build a compact, resumable Parquet keep index"
     )
-    pretrain_index.add_argument("--manifest", required=True, help="Input Parquet manifest JSON")
-    pretrain_index.add_argument("--output", required=True, help="Persistent output directory")
+    pretrain_index.add_argument(
+        "--manifest", required=True, help="Input Parquet manifest JSON"
+    )
+    pretrain_index.add_argument(
+        "--output", required=True, help="Persistent output directory"
+    )
     pretrain_index.add_argument("--profile", choices=["astrai-100b"], required=True)
     pretrain_index.add_argument("--candidate-cap", type=int, default=2000)
     pretrain_index.add_argument("--workers", type=int, default=1)
+    pretrain_index.add_argument("--shards", type=int, default=64)
+    pretrain_index.add_argument("--stop-after-tasks", type=int, default=0)
     pretrain_index.add_argument("--max-files", type=int, default=0)
-    pretrain_index.add_argument("--stop-after-groups", type=int, default=0)
+    pretrain_index.add_argument(
+        "--stop-after-groups",
+        type=int,
+        default=0,
+        help="Deprecated alias for --stop-after-tasks in staged runs",
+    )
 
     run = command("run", "Run a YAML pipeline")
     run.add_argument("pipeline")
